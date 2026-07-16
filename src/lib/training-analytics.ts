@@ -67,7 +67,7 @@ export function adaptiveExplanation(profile: PlayerProfile) {
   if (gamesNeeded) return `${gamesNeeded} more completed game${gamesNeeded === 1 ? "" : "s"} before RivalMind can adjust the challenge.`;
   if (movesNeeded) return `${movesNeeded} more independent moves will make the strength decision more reliable.`;
   if (profile.independentAccuracy >= 76) return "Your independent quality supports a harder rival if recent results stay strong.";
-  if (profile.independentAccuracy < 58) return "The rival will hold or ease only after a repeated low-quality pattern—not one difficult game.";
+  if (profile.independentAccuracy < 58) return "The rival will hold or ease only after a repeated low-quality pattern. One difficult game is never enough.";
   return "Your current rival matches the evidence so far. Results and independent quality must move together.";
 }
 

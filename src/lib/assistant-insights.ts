@@ -115,8 +115,11 @@ export function buildSnapshot(args: {
   const amount = Math.abs(delta / 100).toFixed(2);
   const direction = delta > 20 ? "improved" : delta < -20 ? "fell" : "stayed nearly level";
   const evidence = main?.lineSan.slice(0, 3).join(" ");
+  const forcedMatePosition = Boolean(main?.mate !== undefined || (main && Math.abs(main.score) > 90_000));
   const explanation = args.previousWhiteScore === undefined
     ? `Stockfish starts with ${main?.san ?? "a balanced choice"}. Its current line is ${evidence || "still forming"}.`
-    : `The evaluation ${direction}${direction === "stayed nearly level" ? "" : ` by ${amount} pawns`}. Stockfish now begins with ${main?.san ?? "its top move"}${evidence ? ` and shows ${evidence}` : ""}.`;
+    : forcedMatePosition
+      ? `The position changed decisively. Stockfish now sees a forced mate sequence beginning with ${main?.san ?? "its top move"}${evidence ? ` and shows ${evidence}` : ""}.`
+      : `The evaluation ${direction}${direction === "stayed nearly level" ? "" : ` by ${amount} pawns`}. Stockfish now begins with ${main?.san ?? "its top move"}${evidence ? ` and shows ${evidence}` : ""}.`;
   return { id: `${args.ply}-${args.actor}-${args.move ?? "position"}`, ply: args.ply, fen: args.fen, actor: args.actor, move: args.move, whiteScore: score, delta, severity, result: args.result, explanation };
 }

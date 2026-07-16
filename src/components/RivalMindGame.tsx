@@ -79,7 +79,7 @@ function coachPositionGuidance(result: SearchResult, immediateMateCount = 0) {
   if (best?.mate !== undefined && best.mate < 0) return `Stockfish sees a forced mate against you in ${Math.abs(best.mate)}. The coach can show the longest defense, but no move guarantees recovery.`;
   if (immediateMateCount > 1) return `Checkmate is available now. There are ${immediateMateCount} legal ways to finish immediately, and Stockfish is showing one of them.`;
   if (best?.mate === 1) return "Checkmate is available now. Stockfish has verified that the shown move ends the game immediately.";
-  if (best?.mate !== undefined && best.mate > 0) return `Stockfish has verified mate in ${best.mate}. Follow the shown line carefully—only the first move is guaranteed to keep that mate.`;
+  if (best?.mate !== undefined && best.mate > 0) return `Stockfish has verified mate in ${best.mate}. Follow the shown line carefully. Only the first move is guaranteed to keep that mate.`;
   if (score <= -300) return "Recovery mode: you are clearly worse, so the coach is finding the move that preserves the best practical chances.";
   if (score <= -100) return "You are under pressure, but the game is still playable. The top move limits further damage.";
   if (score >= 300) return "You have a winning advantage. The priority now is converting it without giving counterplay.";
@@ -101,7 +101,7 @@ function MateAlternatives({ mates, stockfishUci }: { mates: ImmediateMate[]; sto
 }
 
 function evaluationLabel(score: number | undefined, mate?: number) {
-  if (score === undefined) return "—";
+  if (score === undefined) return "Not ready";
   if (mate !== undefined) return mate > 0 ? `Mate in ${Math.abs(mate)}` : `Mate against you in ${Math.abs(mate)}`;
   if (Math.abs(score) > 90_000) return score > 0 ? "Forced mate found" : "Forced mate against you";
   const pawns = score / 100;
@@ -118,7 +118,13 @@ function decisionLabel(source: MoveDecision["source"]) {
 function decisionEffect(delta?: number) {
   if (delta === undefined) return "Analysis still completing";
   if (delta >= -20) return "Kept your position steady";
+  if (delta <= -5_000) return "Changed the game decisively";
   return `Cost about ${Math.abs(delta / 100).toFixed(2)} pawns`;
+}
+
+function coachUsageLabel(uses: number, timeMs: number) {
+  if (!uses) return "Not used";
+  return timeMs >= 1_000 ? `${uses} request${uses === 1 ? "" : "s"} · ${formatDuration(timeMs)}` : `${uses} request${uses === 1 ? "" : "s"}`;
 }
 
 function nextTournamentDifficulty(difficulty: Difficulty) {
@@ -577,6 +583,15 @@ export default function RivalMindGame({ timeControl: initialTimeControl = "open"
     beginConfiguredGame(nextDifficulty, true);
   }
 
+  function startTournamentFromSummary() {
+    setSessionMode("cup");
+    setCupRound(1);
+    setCupScore(0);
+    setCoachLevel("off");
+    setAssistantEnabled(true);
+    beginConfiguredGame(difficulty, true);
+  }
+
   function openGameSetup() {
     gameVersionRef.current += 1;
     assistantRequestRef.current += 1;
@@ -604,10 +619,12 @@ export default function RivalMindGame({ timeControl: initialTimeControl = "open"
           RivalMind
         </Link>
         <p>{gameActive ? `${activeTimeLabel} · You play ${playerColor === "w" ? "White" : "Black"}` : "Choose how you want to play"}</p>
-        <div className={styles.headerStats} aria-label="Player record">
-          <span><b>{profile.games}</b> games</span>
-          <span><b>{profile.wins}</b> wins</span>
-          <span>Level <b>{profile.adaptiveLevel}</b></span>
+        <div className={styles.headerActions}>
+          <nav aria-label="Game navigation">
+            <Link href="/">Home</Link>
+            <Link href="/dashboard">My training</Link>
+            <button type="button" onClick={openGameSetup}>New game</button>
+          </nav>
           <AuthMenu />
         </div>
       </header>
@@ -739,7 +756,7 @@ export default function RivalMindGame({ timeControl: initialTimeControl = "open"
                   {coachRevealStep === 2 && <p>{gentleHint(coachResult)}</p>}
                   {coachRevealStep === 3 && <p>Look closely at your <b>{coachPieceName}</b>. Stockfish’s leading line starts by improving or using that piece.</p>}
                   {coachRevealStep === 4 && <div className={styles.candidateList}>{coachResult.candidates.slice(0, 3).map((move,index)=><span key={move.uci}><i>{index + 1}</i>{move.san}</span>)}</div>}
-                  {coachRevealStep === 5 && <><p><b>{coachBest?.san}</b>{immediateMates.length > 1 ? " is one of the legal moves that ends the game now." : ` — ${coachBest ? explainMove(coachBest) : ""}`}</p><MateAlternatives mates={immediateMates} stockfishUci={coachBest?.uci} /><div className={styles.coachTelemetry}><span>Your outlook <b>{evaluationLabel(coachBest?.score, coachBest?.mate)}</b></span><span>Search depth <b>{coachResult.depth} half-moves</b></span></div></>}
+                  {coachRevealStep === 5 && <><p><b>{coachBest?.san}</b>{immediateMates.length > 1 ? " is one of the legal moves that ends the game now." : `. ${coachBest ? explainMove(coachBest) : ""}`}</p><MateAlternatives mates={immediateMates} stockfishUci={coachBest?.uci} /><div className={styles.coachTelemetry}><span>Your outlook <b>{evaluationLabel(coachBest?.score, coachBest?.mate)}</b></span><span>Search depth <b>{coachResult.depth} half-moves</b></span></div></>}
                   {coachRevealStep < 5 && <button type="button" className={styles.revealButton} disabled={!canRevealCoachStep(coachRevealStep, coachThinking)} onClick={revealNextCoachStep}>{coachThinking && coachRevealStep >= 3 ? "Finishing Stockfish search…" : coachRevealStep === 4 ? "Reveal Stockfish’s choice" : "Show the next clue"}</button>}
                 </div>
               ) : (
@@ -751,7 +768,7 @@ export default function RivalMindGame({ timeControl: initialTimeControl = "open"
                       <span key={`${move.from}-${move.to}`}><i>{index + 1}</i>{move.san}</span>
                     ))}
                   </div>
-                  <p><b>{coachResult.candidates[0]?.san}</b>{immediateMates.length > 1 ? " is Stockfish's choice, but it is not the only checkmate." : ` — ${coachResult.candidates[0] ? explainMove(coachResult.candidates[0]) : ""}`}</p>
+                  <p><b>{coachResult.candidates[0]?.san}</b>{immediateMates.length > 1 ? " is Stockfish's choice, but it is not the only checkmate." : `. ${coachResult.candidates[0] ? explainMove(coachResult.candidates[0]) : ""}`}</p>
                   <MateAlternatives mates={immediateMates} stockfishUci={coachBest?.uci} />
                   <div className={styles.coachTelemetry}><span>Your outlook <b>{evaluationLabel(coachResult.candidates[0]?.score, coachResult.candidates[0]?.mate)}</b></span><span>Search depth <b>{coachResult.depth} half-moves</b></span></div>
                   <details className={styles.coachExplainer}><summary>What do these numbers mean?</summary><p><b>+1.00</b> is roughly a one-pawn advantage for you. <b>Depth 16</b> means the engine completed a main search about 16 half-moves ahead, while also checking many deeper tactical branches. A mate count is shown only when Stockfish returns a forced mate line.</p></details>
@@ -801,19 +818,24 @@ export default function RivalMindGame({ timeControl: initialTimeControl = "open"
       {setupOpen && (
         <div className={styles.modalBackdrop} role="presentation">
           <section className={styles.setupCard} role="dialog" aria-modal="true" aria-labelledby="setup-title">
-            <div className={styles.setupHeading}><span className={styles.eyebrow}>New game</span><h2 id="setup-title">How do you want to play?</h2><p>Choose the experience first, then set your color, clock, and Rival.</p></div>
+            <div className={styles.setupNav}><Link href="/">Back to home</Link><span>Game setup</span></div>
+            <div className={styles.setupScroll}>
+            <div className={styles.setupHeading}><h2 id="setup-title">Choose your game</h2><p>Pick a mode, your color, a clock, and Rival strength.</p></div>
             <div className={styles.setupIdentity}><span className={styles.naviiAvatar}><Navii seed={profile.avatarSeed} size={40} title={profile.displayName} background="ring" /></span><label htmlFor="training-name"><b>Your training name</b><input id="training-name" maxLength={60} value={profile.displayName} onChange={(event) => setProfile((current) => ({ ...current, displayName: event.target.value }))} /></label><button type="button" onClick={() => setProfile((current) => ({ ...current, avatarSeed: uniqueAvatarSeed() }))}>New icon</button></div>
             <fieldset className={styles.setupSection}><legend>Experience</legend><div className={styles.sessionChoices}>
-              <button type="button" aria-pressed={sessionMode === "game"} onClick={() => setSessionMode("game")}><b>Play</b><span>No live help. Review the game afterward.</span></button>
-              <button type="button" aria-pressed={sessionMode === "training"} onClick={() => setSessionMode("training")}><b>Train</b><span>Coach and explanations during the game.</span></button>
-              <button type="button" aria-pressed={sessionMode === "cup"} onClick={() => setSessionMode("cup")}><b>Tournament</b><span>Three rounds. The Rival gets stronger.</span></button>
+              <button type="button" aria-pressed={sessionMode === "game"} onClick={() => setSessionMode("game")}><b>Play</b><span>No coach during play. Full review after.</span></button>
+              <button type="button" aria-pressed={sessionMode === "training"} onClick={() => setSessionMode("training")}><b>Train</b><span>Optional coach and live explanations.</span></button>
+              <button type="button" aria-pressed={sessionMode === "cup"} onClick={() => setSessionMode("cup")}><b>Tournament</b><span>Three games. Rival gets stronger each round.</span></button>
             </div><p className={styles.modeNote}>{sessionMode === "training" ? "Live learning is on. You decide how much help to reveal." : sessionMode === "cup" ? "Tournament games hide live assistance. Each round still receives a full review." : "This feels like a real game. The coach and live assistant stay off until your review."}</p></fieldset>
             <fieldset className={styles.setupSection}><legend>Your side</legend><div className={styles.choiceGrid}>{SIDE_OPTIONS.map((option) => <button type="button" key={option.value} aria-pressed={sideChoice === option.value} onClick={() => setSideChoice(option.value)}><b>{option.label}</b><span>{option.detail}</span></button>)}</div></fieldset>
             <fieldset className={styles.setupSection}><legend>Time</legend><div className={styles.timeGrid}>{TIME_OPTIONS.map((option) => <button type="button" key={option} aria-pressed={timeControl === option} onClick={() => setTimeControl(option)}><b>{TIME_CONTROLS[option].short}</b><span>{TIME_CONTROLS[option].label}</span></button>)}</div></fieldset>
             {timeControl === "custom" && <div className={styles.customTimeFields}><label htmlFor="custom-minutes"><span>Minutes per player</span><input id="custom-minutes" type="number" min="1" max="180" value={customMinutes} onChange={(event) => setCustomMinutes(Math.max(1, Math.min(180, Number(event.target.value) || 1)))} /></label><label htmlFor="custom-increment"><span>Increment after each move</span><div><input id="custom-increment" type="number" min="0" max="60" value={customIncrement} onChange={(event) => setCustomIncrement(Math.max(0, Math.min(60, Number(event.target.value) || 0)))} /><small>seconds</small></div></label></div>}
             <label className={styles.setupField} htmlFor="setup-difficulty"><span>Rival strength</span><select id="setup-difficulty" value={difficulty} onChange={(event) => setDifficulty(event.target.value as Difficulty)}>{DIFFICULTIES.map((level) => <option key={level} value={level}>{level === "adaptive" ? `Adaptive · current level ${profile.adaptiveLevel}` : `${level[0].toUpperCase() + level.slice(1)} · ${DIFFICULTY_PRESETS[level].elo} Elo`}</option>)}</select><small>{difficulty === "adaptive" ? "Uses your unassisted move quality and recent results to choose the next challenge." : DIFFICULTY_PRESETS[difficulty].description}</small></label>
-            <div className={styles.setupSummary}><span>Your setup</span><b>{sessionMode === "cup" ? "Tournament" : sessionMode === "training" ? "Training" : "Game"} · {activeTimeLabel} · {sideChoice === "random" ? "Random color" : sideChoice} · {difficulty}</b></div>
-            <button className={styles.startGameButton} type="button" disabled={rivalEngineStatus !== "ready" || !profileReady || !profile.displayName.trim()} onClick={startConfiguredGame}>{rivalEngineStatus === "ready" ? sessionMode === "cup" ? "Enter tournament" : sessionMode === "training" ? "Start training" : "Start game" : "Getting Stockfish ready…"}</button>
+            </div>
+            <div className={styles.setupFooter}>
+              <div className={styles.setupSummary}><span><small>Mode</small><b>{sessionMode === "cup" ? "Tournament" : sessionMode === "training" ? "Training" : "Play"}</b></span><span><small>Clock</small><b>{activeTimeLabel}</b></span><span><small>Side</small><b>{sideChoice === "random" ? "Random" : sideChoice}</b></span><span><small>Rival</small><b>{difficulty}</b></span></div>
+              <button className={styles.startGameButton} type="button" disabled={rivalEngineStatus !== "ready" || !profileReady || !profile.displayName.trim()} onClick={startConfiguredGame}>{rivalEngineStatus === "ready" ? sessionMode === "cup" ? "Start tournament" : sessionMode === "training" ? "Start training" : "Start game" : "Getting Stockfish ready…"}</button>
+            </div>
           </section>
         </div>
       )}
@@ -831,31 +853,43 @@ export default function RivalMindGame({ timeControl: initialTimeControl = "open"
       {summary && (
         <div className={styles.modalBackdrop} role="presentation">
           <section className={styles.summaryCard} role="dialog" aria-modal="true" aria-labelledby="game-summary-title">
+            <div className={styles.summaryTopNav}><Link href="/">Back to home</Link><span>Game review</span></div>
             <div className={`${styles.outcomeHero} ${summary.result === "win" ? styles.outcomeWin : summary.result === "loss" ? styles.outcomeLoss : styles.outcomeDraw}`}>
               <div><span className={styles.outcomeBadge}>{summary.result}</span><h2 id="game-summary-title">{summary.outcomeTitle}</h2><p>{summary.outcomeDetail}</p></div>
               <div className={styles.scoreline}><span>You</span><b>{summary.scoreline}</b><span>Rival</span></div>
             </div>
-            <div className={styles.summaryIntro}><span className={styles.eyebrow}>Training complete · +{summary.telemetry.trainingPointsEarned} points</span><p>{summary.headline}</p></div>
+            <div className={styles.summaryIntro}><span className={styles.eyebrow}>{sessionMode === "cup" ? `Tournament round ${cupRound} complete` : sessionMode === "training" ? "Training complete" : "Game complete"} <b>+{summary.telemetry.trainingPointsEarned} points</b></span><p>{summary.headline}</p></div>
+            <div className={styles.nextStepCard}>
+              <div><span>Choose your next step</span><p>{sessionMode === "cup" && cupRound < 3 ? "Continue your tournament, or switch to another way to learn." : "Keep your setup, enter a tournament, or review the positions that mattered."}</p></div>
+              <div className={styles.nextStepActions}>
+                <button type="button" onClick={sessionMode === "cup" && cupRound < 3 ? continueTournament : startConfiguredGame}>{sessionMode === "cup" && cupRound < 3 ? `Play round ${cupRound + 1}` : sessionMode === "cup" ? "Restart tournament" : "Play again"}</button>
+                {sessionMode !== "cup" && <button type="button" className={styles.secondaryAction} onClick={startTournamentFromSummary}>Start tournament</button>}
+                <button type="button" className={styles.secondaryAction} onClick={openGameSetup}>Change game</button>
+              </div>
+              <div className={styles.nextStepLinks}><Link href="/practice">Practice key positions</Link><Link href="/dashboard">View my training</Link></div>
+            </div>
             <div className={styles.reviewStats}>
               <span>Time spent<b>{formatDuration(summary.telemetry.totalTimeMs)}</b></span>
               <span>Your thinking<b>{formatDuration(summary.telemetry.playerThinkMs)}</b></span>
-              <span>Coach used<b>{summary.telemetry.coachUses}× · {formatDuration(summary.telemetry.coachTimeMs)}</b></span>
+              <span>Coach used<b>{coachUsageLabel(summary.telemetry.coachUses, summary.telemetry.coachTimeMs)}</b></span>
               <span>Move quality<b>{summary.telemetry.analyzedMoves ? `${summary.telemetry.accuracy}%` : "Not scored"}</b></span>
             </div>
-            <div className={styles.independenceReview}>
-              <div><span>Your real-strength signal</span><b>{summary.telemetry.independentMoves ? `${summary.telemetry.independentAccuracy}%` : "Not enough moves"}</b><p>Based only on {summary.telemetry.independentMoves} moves you chose without opening the coach.</p></div>
-              <div><span>Coach relationship</span><b>{summary.telemetry.coachFollowedMoves} followed · {summary.telemetry.coachDivergedMoves} declined</b><p>Gentle hints used: {summary.telemetry.coachGuidedMoves}. These moves stay visible, but do not inflate your independent score.</p></div>
-              <div><span>Decision confidence</span><b>{summaryCalibration?.label}</b><p>{summaryCalibration?.detail}</p></div>
-              <div><span>Review queue</span><b>{reviewPositionCount} positions</b><p>Your largest verified mistakes return as short practice exercises.</p></div>
-            </div>
-            {sessionMode === "cup" && <div className={styles.cupReview}><span>Training Cup · Round {cupRound} of 3</span><b>{cupScore} points</b><p>Win = 3 · draw = 1. Each round raises the rival one strength step.</p></div>}
-            {summary.decisions.length > 0 && <details className={styles.decisionReview} open><summary><b>Your decision trail</b><span>{summary.decisions.length} moves</span></summary><div>{summary.decisions.map((decision) => <article key={decision.ply} data-source={decision.source}><span>{Math.ceil(decision.ply / 2)}.</span><div><b>{decision.move}</b><small>{decisionLabel(decision.source)}{decision.playerIdea ? ` · Your idea: ${decision.playerIdea}` : ""}{decision.suggestedMoves.length ? ` · Coach showed ${decision.suggestedMoves.join(", ")}` : ""}{decision.confidence ? ` · Felt ${decision.confidence}` : ""}</small></div><em>{decisionEffect(decision.delta)}</em></article>)}</div></details>}
-            <div className={styles.reviewLesson}><span>What went well</span><p>{summary.well}</p></div>
-            <div className={styles.reviewLesson}><span>Key moment</span><p>{summary.keyMoment}</p></div>
-            <div className={styles.reviewLesson}><span>Try next game</span><p>{summary.watch}</p></div>
-            <div className={styles.adaptiveReview}><span>Adaptive rival</span><b>Level {summary.telemetry.adaptiveBefore} → {summary.telemetry.adaptiveAfter}</b><p>{summary.telemetry.adaptiveAfter > summary.telemetry.adaptiveBefore ? "Your recent form earned a stronger challenge." : summary.telemetry.adaptiveAfter < summary.telemetry.adaptiveBefore ? "The next game will give you more room to learn." : "One game never changes your level. RivalMind waits for a clear recent pattern."}</p></div>
-            {summary.newMilestones.length > 0 && <div className={styles.milestoneEarned}><span>Milestone unlocked</span><b>{summary.newMilestones.join(" · ")}</b></div>}
-            <div className={styles.reviewActions}><button type="button" onClick={sessionMode === "cup" && cupRound < 3 ? continueTournament : startConfiguredGame}>{sessionMode === "cup" && cupRound < 3 ? `Play round ${cupRound + 1}` : sessionMode === "cup" ? "Restart cup" : "Play same setup"}</button><Link href="/practice">Practice key positions</Link><button type="button" className={styles.secondaryAction} onClick={openGameSetup}>Change setup</button><Link href="/dashboard">See my training</Link></div>
+            <div className={styles.lessonHighlights}><div className={styles.reviewLesson}><span>What went well</span><p>{summary.well}</p></div><div className={styles.reviewLesson}><span>Key moment</span><p>{summary.keyMoment}</p></div><div className={styles.reviewLesson}><span>Try next game</span><p>{summary.watch}</p></div></div>
+            <details className={styles.summaryDetails}>
+              <summary><span><b>Full learning analysis</b><small>Strength, coach use, and every move</small></span><i>Open</i></summary>
+              <div className={styles.summaryDetailsBody}>
+                <div className={styles.independenceReview}>
+                  <div><span>Your real-strength signal</span><b>{summary.telemetry.independentMoves ? `${summary.telemetry.independentAccuracy}%` : "Not enough moves"}</b><p>Based only on {summary.telemetry.independentMoves} moves you chose without opening the coach.</p></div>
+                  <div><span>Coach relationship</span><b>{summary.telemetry.coachFollowedMoves} followed, {summary.telemetry.coachDivergedMoves} declined</b><p>Gentle hints used: {summary.telemetry.coachGuidedMoves}. These moves stay visible, but do not inflate your independent score.</p></div>
+                  <div><span>Decision confidence</span><b>{summaryCalibration?.label}</b><p>{summaryCalibration?.detail}</p></div>
+                  <div><span>Review queue</span><b>{reviewPositionCount} positions</b><p>Your largest verified mistakes return as short practice exercises.</p></div>
+                </div>
+                {sessionMode === "cup" && <div className={styles.cupReview}><span>Training Cup, round {cupRound} of 3</span><b>{cupScore} points</b><p>Win = 3, draw = 1. Each round raises Rival one strength step.</p></div>}
+                {summary.decisions.length > 0 && <details className={styles.decisionReview}><summary><b>Your decision trail</b><span>{summary.decisions.length} moves</span></summary><div>{summary.decisions.map((decision) => <article key={decision.ply} data-source={decision.source}><span>{Math.ceil(decision.ply / 2)}.</span><div><b>{decision.move}</b><small>{decisionLabel(decision.source)}{decision.playerIdea ? `. Your idea: ${decision.playerIdea}` : ""}{decision.suggestedMoves.length ? `. Coach showed ${decision.suggestedMoves.join(", ")}` : ""}{decision.confidence ? `. Felt ${decision.confidence}` : ""}</small></div><em>{decisionEffect(decision.delta)}</em></article>)}</div></details>}
+                <div className={styles.adaptiveReview}><span>Adaptive rival</span><b>Level {summary.telemetry.adaptiveBefore} to {summary.telemetry.adaptiveAfter}</b><p>{summary.telemetry.adaptiveAfter > summary.telemetry.adaptiveBefore ? "Your recent form earned a stronger challenge." : summary.telemetry.adaptiveAfter < summary.telemetry.adaptiveBefore ? "The next game will give you more room to learn." : "One game never changes your level. RivalMind waits for a clear recent pattern."}</p></div>
+                {summary.newMilestones.length > 0 && <div className={styles.milestoneEarned}><span>Milestone unlocked</span><b>{summary.newMilestones.join(", ")}</b></div>}
+              </div>
+            </details>
           </section>
         </div>
       )}
