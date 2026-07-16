@@ -40,6 +40,6 @@ Stockfish is the only analysis and opponent engine. RivalMind converts its score
 
 ## Cloud setup
 
-Copy `.env.example` to `.env.local` and provide a Supabase project URL and publishable key. Never expose a secret or service-role key. Apply migrations in `supabase/migrations`, then configure the Supabase Auth URL allow list with your local and production `/auth/callback` URLs. RivalMind uses email magic links only.
+Copy `.env.example` to `.env.local` and provide a Supabase project URL and publishable key. Never expose a secret or service-role key. Apply migrations in `supabase/migrations`, then configure the Supabase Auth URL allow list with your local and production `/auth/callback` URLs. RivalMind uses email and password authentication with one-time email confirmation and password recovery.
 
 See [docs/CLOUD.md](docs/CLOUD.md) for the table model, RLS contract, and client API flows.

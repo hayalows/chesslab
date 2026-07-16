@@ -15,7 +15,7 @@ RivalMind uses Supabase Auth plus Postgres. Browser code receives only the proje
 
 ## Client flows
 
-- Email: `signInWithOtp` sends a magic link to `/auth/callback`; the route exchanges the PKCE code for a cookie session.
+- Email and password: `signUp` sends a one-time confirmation to `/auth/callback`, `signInWithPassword` handles later sign-ins, and `resetPasswordForEmail` routes existing passwordless users through `/reset-password` so they can choose a password.
 - Session refresh: Next.js `proxy.ts` calls `auth.getClaims()` and writes refreshed cookies to the response.
 - Guest upgrade: local play is never blocked. On authenticated game completion, the local aggregate profile is upserted and the completed game plus move evidence is inserted.
 - Dashboard: the browser queries only the signed-in user's profile, games, rating history and aggregate stats; RLS remains the final authorization boundary.
