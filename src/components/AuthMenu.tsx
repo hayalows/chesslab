@@ -5,6 +5,7 @@ import { createPortal } from "react-dom";
 import type { User } from "@supabase/supabase-js";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
+import { friendlyAuthError } from "@/lib/auth-messages";
 import styles from "./AuthMenu.module.css";
 
 type Props = { triggerLabel?: string; redirectTo?: string; prominent?: boolean };
@@ -20,6 +21,7 @@ export default function AuthMenu({ triggerLabel = "Save progress", redirectTo = 
   const [confirmPassword, setConfirmPassword] = useState("");
   const [notice, setNotice] = useState("");
   const [sending, setSending] = useState(false);
+  const [emailSent, setEmailSent] = useState(false);
 
   useEffect(() => {
     if (!supabase) return;
@@ -41,6 +43,7 @@ export default function AuthMenu({ triggerLabel = "Save progress", redirectTo = 
     setPassword("");
     setConfirmPassword("");
     setNotice("");
+    setEmailSent(false);
   }
 
   function callback(next = redirectTo) {
@@ -56,7 +59,7 @@ export default function AuthMenu({ triggerLabel = "Save progress", redirectTo = 
     setNotice("");
     if (mode === "sign-in") {
       const { error } = await supabase.auth.signInWithPassword({ email: email.trim(), password });
-      if (error) setNotice(error.message === "Invalid login credentials" ? "That email or password is not correct." : error.message);
+      if (error) setNotice(friendlyAuthError(error));
       else window.location.assign(redirectTo);
     } else {
       const { data, error } = await supabase.auth.signUp({
@@ -64,9 +67,12 @@ export default function AuthMenu({ triggerLabel = "Save progress", redirectTo = 
         password,
         options: { emailRedirectTo: callback() },
       });
-      if (error) setNotice(error.message);
+      if (error) setNotice(friendlyAuthError(error));
       else if (data.session) window.location.assign(redirectTo);
-      else setNotice("Check your email once to confirm your account. After that, sign in with your password.");
+      else {
+        setEmailSent(true);
+        setNotice("Check your email once to confirm your account. After that, sign in with your password.");
+      }
     }
     setSending(false);
   }
@@ -77,7 +83,11 @@ export default function AuthMenu({ triggerLabel = "Save progress", redirectTo = 
     const { error } = await supabase.auth.resetPasswordForEmail(email.trim(), {
       redirectTo: callback("/reset-password"),
     });
-    setNotice(error ? error.message : "Password reset email sent. Use that link to choose a new password.");
+    if (error) setNotice(friendlyAuthError(error));
+    else {
+      setEmailSent(true);
+      setNotice("Password reset email sent. Use that link to choose a new password.");
+    }
     setSending(false);
   }
 
@@ -102,8 +112,8 @@ export default function AuthMenu({ triggerLabel = "Save progress", redirectTo = 
         <input id="rivalmind-password" type="password" autoComplete={mode === "sign-in" ? "current-password" : "new-password"} value={password} onChange={(event) => setPassword(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && mode === "sign-in") void submit(); }} placeholder="At least 8 characters" />
         {mode === "sign-up" && <><label htmlFor="rivalmind-confirm-password">Confirm password</label><input id="rivalmind-confirm-password" type="password" autoComplete="new-password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void submit(); }} placeholder="Type it again" /></>}
 
-        {mode === "sign-in" && <button className={styles.forgotButton} type="button" disabled={sending} onClick={() => void recoverPassword()}>Forgot password?</button>}
-        <button className={styles.continueButton} type="button" disabled={sending} onClick={() => void submit()}>{sending ? "Please wait…" : mode === "sign-in" ? "Sign in" : "Create my profile"}</button>
+        {mode === "sign-in" && <button className={styles.forgotButton} type="button" disabled={sending || emailSent} onClick={() => void recoverPassword()}>Forgot password?</button>}
+        <button className={styles.continueButton} type="button" disabled={sending || emailSent} onClick={() => void submit()}>{sending ? "Please wait…" : emailSent ? "Check your inbox" : mode === "sign-in" ? "Sign in" : "Create my profile"}</button>
         <small className={notice ? styles.notice : ""} aria-live="polite">{notice || (mode === "sign-up" ? "You’ll confirm your email once. Your password handles future sign-ins." : "Existing magic-link user? Use Forgot password to create your password.")}</small>
         <div className={styles.guestLine}><span>Want to play without an account?</span><Link href="/play?time=open" onClick={() => setOpen(false)}>Continue as guest</Link></div>
       </section>

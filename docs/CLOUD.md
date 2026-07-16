@@ -22,6 +22,10 @@ RivalMind uses Supabase Auth plus Postgres. Browser code receives only the proje
 - Adaptive strength: the client retains the last five results, requires at least four results and three games between level changes, and stores the before/after levels with each game.
 - Milestones: guest milestones migrate at first sign-in; later unlocks are inserted into `achievements` with the completed game sync.
 
+## Production email
+
+Supabase's built-in Auth email sender is for development and has a small project-wide quota. Before public testing, configure a custom SMTP provider under Authentication > Emails > SMTP Settings, then review the project's Authentication > Rate Limits. Keep email confirmation enabled.
+
 ## Interpretation contract
 
 Stored explanations must cite the Stockfish evaluation change or principal variation that produced them. `evaluation_cp`, `wdl`, `depth`, `nodes`, and `principal_variation` remain alongside the prose so every learning claim can be audited. Style detection must remain blank until at least 20 analyzed games.
