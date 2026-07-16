@@ -12,7 +12,7 @@ import {
   RivalEngine,
   RivalAssistant,
 } from "@/lib/engine-adapter";
-import { buildSnapshot } from "@/lib/assistant-insights";
+import { buildSnapshot, immediateCheckmates, type ImmediateMate } from "@/lib/assistant-insights";
 import {
   DEFAULT_PROFILE,
   type CoachLevel,
@@ -72,16 +72,32 @@ function gentleHint(result: SearchResult) {
   return "One of your pieces can become more active without creating a new weakness.";
 }
 
-function coachPositionGuidance(result: SearchResult) {
+function coachPositionGuidance(result: SearchResult, immediateMateCount = 0) {
   const best = result.candidates[0];
   const score = best?.score;
   if (score === undefined) return "Stockfish is still forming its view of the position.";
   if (best?.mate !== undefined && best.mate < 0) return `Stockfish sees a forced mate against you in ${Math.abs(best.mate)}. The coach can show the longest defense, but no move guarantees recovery.`;
+  if (immediateMateCount > 1) return `Checkmate is available now. There are ${immediateMateCount} legal ways to finish immediately, and Stockfish is showing one of them.`;
+  if (best?.mate === 1) return "Checkmate is available now. Stockfish has verified that the shown move ends the game immediately.";
   if (best?.mate !== undefined && best.mate > 0) return `Stockfish has verified mate in ${best.mate}. Follow the shown line carefully—only the first move is guaranteed to keep that mate.`;
   if (score <= -300) return "Recovery mode: you are clearly worse, so the coach is finding the move that preserves the best practical chances.";
   if (score <= -100) return "You are under pressure, but the game is still playable. The top move limits further damage.";
   if (score >= 300) return "You have a winning advantage. The priority now is converting it without giving counterplay.";
   return "The game is still competitive. This move gives Stockfish’s best balance of safety and activity.";
+}
+
+function MateAlternatives({ mates, stockfishUci }: { mates: ImmediateMate[]; stockfishUci?: string }) {
+  if (mates.length < 2) return null;
+  const ordered = [...mates].sort((a, b) => Number(b.uci === stockfishUci) - Number(a.uci === stockfishUci));
+  return (
+    <details className={styles.mateAlternatives}>
+      <summary>See all {mates.length} immediate checkmates</summary>
+      <div>
+        {ordered.map((move) => <span key={move.uci} data-stockfish={move.uci === stockfishUci}><b>{move.san}</b>{move.uci === stockfishUci ? "Stockfish choice" : "Also checkmate"}</span>)}
+      </div>
+      <p>Every move listed is legal and ends the game now. Stockfish chooses one first, but the others are equally final.</p>
+    </details>
+  );
 }
 
 function evaluationLabel(score: number | undefined, mate?: number) {
@@ -448,11 +464,13 @@ export default function RivalMindGame({ timeControl: initialTimeControl = "open"
     const cached = assistantRef.current?.peek(position, coachCacheMode(coachLevel));
     const registerConsultation = (result: SearchResult) => {
       const visibleCandidates = coachLevel === "gentle" ? [] : result.candidates.slice(0, coachLevel === "best" ? 1 : 3);
+      const mates = coachLevel === "gentle" ? [] : immediateCheckmates(position);
+      const shownMoves = mates.length > 1 ? mates : visibleCandidates;
       consultationRef.current = {
         ply: gameRef.current.history().length + 1,
         coachLevel,
-        shownMoves: visibleCandidates.map((move) => move.uci),
-        shownSans: visibleCandidates.map((move) => move.san),
+        shownMoves: shownMoves.map((move) => move.uci),
+        shownSans: shownMoves.map((move) => move.san),
         playerIdea: idea,
       };
     };
@@ -482,10 +500,12 @@ export default function RivalMindGame({ timeControl: initialTimeControl = "open"
     const next = Math.min(5, coachRevealStep + 1);
     setCoachRevealStep(next);
     if (next >= 4 && consultationRef.current) {
+      const mates = next >= 5 ? immediateCheckmates(gameRef.current.fen()) : [];
+      const shownMoves = mates.length > 1 ? mates : coachResult.candidates.slice(0, 3);
       consultationRef.current = {
         ...consultationRef.current,
-        shownMoves: coachResult.candidates.slice(0, 3).map((move) => move.uci),
-        shownSans: coachResult.candidates.slice(0, 3).map((move) => move.san),
+        shownMoves: shownMoves.map((move) => move.uci),
+        shownSans: shownMoves.map((move) => move.san),
       };
     }
   }
@@ -568,8 +588,9 @@ export default function RivalMindGame({ timeControl: initialTimeControl = "open"
     setSetupOpen(true);
   }
 
-  const ideaComparison = coachResult ? comparePlayerIdea(playerIdea, coachResult) : null;
   const coachBest = coachResult?.candidates[0];
+  const immediateMates = useMemo(() => coachResult ? immediateCheckmates(fen) : [], [coachResult, fen]);
+  const ideaComparison = coachResult ? comparePlayerIdea(playerIdea, coachResult, immediateMates) : null;
   const coachPiece = coachBest ? renderGame.get(coachBest.from as Square)?.type : undefined;
   const coachPieceName = coachPiece ? ({ p: "pawn", n: "knight", b: "bishop", r: "rook", q: "queen", k: "king" } as const)[coachPiece] : "piece";
   const trainingPlan = weeklyPlan(profile, reviewPositionCount);
@@ -712,25 +733,26 @@ export default function RivalMindGame({ timeControl: initialTimeControl = "open"
                 <div className={styles.emptyCoach}><span>↗</span><p>Ask for help only when you want it. Your opponent stays separate.</p></div>
               ) : coachLevel === "gentle" ? (
                 <div className={styles.coachAdvice}>
-                  <p className={styles.coachPosition}>{coachPositionGuidance(coachResult)}</p>
+                  <p className={styles.coachPosition}>{coachPositionGuidance(coachResult, immediateMates.length)}</p>
                   <span className={styles.adviceLabel}>Clue {coachRevealStep} of 5</span>
                   {coachRevealStep === 1 && <p>Start by naming what changed on the last move and which side has the more urgent problem.</p>}
                   {coachRevealStep === 2 && <p>{gentleHint(coachResult)}</p>}
                   {coachRevealStep === 3 && <p>Look closely at your <b>{coachPieceName}</b>. Stockfish’s leading line starts by improving or using that piece.</p>}
                   {coachRevealStep === 4 && <div className={styles.candidateList}>{coachResult.candidates.slice(0, 3).map((move,index)=><span key={move.uci}><i>{index + 1}</i>{move.san}</span>)}</div>}
-                  {coachRevealStep === 5 && <><p><b>{coachBest?.san}</b> — {coachBest && explainMove(coachBest)}</p><div className={styles.coachTelemetry}><span>Your outlook <b>{evaluationLabel(coachBest?.score, coachBest?.mate)}</b></span><span>Search depth <b>{coachResult.depth} half-moves</b></span></div></>}
+                  {coachRevealStep === 5 && <><p><b>{coachBest?.san}</b>{immediateMates.length > 1 ? " is one of the legal moves that ends the game now." : ` — ${coachBest ? explainMove(coachBest) : ""}`}</p><MateAlternatives mates={immediateMates} stockfishUci={coachBest?.uci} /><div className={styles.coachTelemetry}><span>Your outlook <b>{evaluationLabel(coachBest?.score, coachBest?.mate)}</b></span><span>Search depth <b>{coachResult.depth} half-moves</b></span></div></>}
                   {coachRevealStep < 5 && <button type="button" className={styles.revealButton} disabled={!canRevealCoachStep(coachRevealStep, coachThinking)} onClick={revealNextCoachStep}>{coachThinking && coachRevealStep >= 3 ? "Finishing Stockfish search…" : coachRevealStep === 4 ? "Reveal Stockfish’s choice" : "Show the next clue"}</button>}
                 </div>
               ) : (
                 <div className={styles.coachAdvice}>
-                  <p className={styles.coachPosition}>{coachPositionGuidance(coachResult)}</p>
-                  <span className={styles.adviceLabel}>{coachLevel === "best" ? "Best move" : "Candidate moves"}</span>
+                  <p className={styles.coachPosition}>{coachPositionGuidance(coachResult, immediateMates.length)}</p>
+                  <span className={styles.adviceLabel}>{immediateMates.length > 1 ? `${immediateMates.length} checkmates` : coachLevel === "best" ? "Best move" : "Candidate moves"}</span>
                   <div className={styles.candidateList}>
                     {coachResult.candidates.slice(0, coachLevel === "best" ? 1 : 3).map((move, index) => (
                       <span key={`${move.from}-${move.to}`}><i>{index + 1}</i>{move.san}</span>
                     ))}
                   </div>
-                  <p><b>{coachResult.candidates[0]?.san}</b> — {coachResult.candidates[0] && explainMove(coachResult.candidates[0])}</p>
+                  <p><b>{coachResult.candidates[0]?.san}</b>{immediateMates.length > 1 ? " is Stockfish's choice, but it is not the only checkmate." : ` — ${coachResult.candidates[0] ? explainMove(coachResult.candidates[0]) : ""}`}</p>
+                  <MateAlternatives mates={immediateMates} stockfishUci={coachBest?.uci} />
                   <div className={styles.coachTelemetry}><span>Your outlook <b>{evaluationLabel(coachResult.candidates[0]?.score, coachResult.candidates[0]?.mate)}</b></span><span>Search depth <b>{coachResult.depth} half-moves</b></span></div>
                   <details className={styles.coachExplainer}><summary>What do these numbers mean?</summary><p><b>+1.00</b> is roughly a one-pawn advantage for you. <b>Depth 16</b> means the engine completed a main search about 16 half-moves ahead, while also checking many deeper tactical branches. A mate count is shown only when Stockfish returns a forced mate line.</p></details>
                 </div>

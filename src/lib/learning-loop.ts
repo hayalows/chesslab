@@ -6,12 +6,14 @@ function normalizeMove(value: string) {
   return value.toLowerCase().replace(/[\s+#=!?-]/g, "");
 }
 
-export function comparePlayerIdea(idea: string, result: SearchResult) {
+export function comparePlayerIdea(idea: string, result: SearchResult, immediateMates: { san: string; uci: string }[] = []) {
   const clean = normalizeMove(idea);
   if (!clean) return null;
   const matchIndex = result.candidates.findIndex((move) => normalizeMove(move.san) === clean || normalizeMove(move.uci) === clean);
+  const matchingMate = immediateMates.find((move) => normalizeMove(move.san) === clean || normalizeMove(move.uci) === clean);
   const best = result.candidates[0];
   if (matchIndex === 0) return { tone: "strong" as const, text: `${idea} matches Stockfish's first choice.` };
+  if (matchingMate) return { tone: "strong" as const, text: `${idea} is also a legal checkmate in one. It ends the game immediately, even though Stockfish listed another checkmate first.` };
   if (matchIndex > 0) {
     const move = result.candidates[matchIndex];
     const gap = Math.max(0, (best.score - move.score) / 100);

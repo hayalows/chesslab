@@ -1,6 +1,34 @@
 import { Chess } from "chess.js";
 import type { AssistantSnapshot, PlayerColor, SearchMove, SearchResult } from "./game-types";
 
+export type ImmediateMate = {
+  san: string;
+  uci: string;
+  from: string;
+  to: string;
+};
+
+export function immediateCheckmates(fen: string): ImmediateMate[] {
+  try {
+    const position = new Chess(fen);
+    const mates: ImmediateMate[] = [];
+    for (const move of position.moves({ verbose: true })) {
+      position.move({ from: move.from, to: move.to, promotion: move.promotion });
+      const isMate = position.isCheckmate();
+      position.undo();
+      if (isMate) mates.push({
+        san: move.san,
+        uci: `${move.from}${move.to}${move.promotion ?? ""}`,
+        from: move.from,
+        to: move.to,
+      });
+    }
+    return mates;
+  } catch {
+    return [];
+  }
+}
+
 export function whiteScore(fen: string, score: number) {
   return fen.split(" ")[1] === "w" ? score : -score;
 }

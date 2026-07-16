@@ -12,6 +12,14 @@ test("player ideas are compared only with searched Stockfish candidates", () => 
   assert.match(comparePlayerIdea("a3", result)?.text ?? "", /did not include/);
 });
 
+test("a different legal mate in one is recognized as fully correct", () => {
+  const result = { candidates: [move("e5#", "e4e5", 100_000)] } as SearchResult;
+  const comparison = comparePlayerIdea("Kc2", result, [{ san: "Kc2#", uci: "c1c2" }]);
+
+  assert.equal(comparison?.tone, "strong");
+  assert.match(comparison?.text ?? "", /also a legal checkmate in one/);
+});
+
 test("verified mistakes become deduplicated review positions", () => {
   const result = { candidates: [move("Nf3", "g1f3", 30)] } as SearchResult;
   const timeline = [
