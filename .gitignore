@@ -21,6 +21,10 @@ yarn-error.log*
 .vercel
 *.tsbuildinfo
 next-env.d.ts
+/public/stockfish/stockfish.js
+/public/stockfish/stockfish.wasm
+/public/stockfish/stockfish.worker.js
+/public/stockfish/Copying.txt
 
 # temporary scaffold
 /rivalmind-scaffold/

@@ -11,6 +11,8 @@ const eslintConfig = defineConfig([
     ".next/**",
     "out/**",
     "build/**",
+    "public/stockfish/stockfish.js",
+    "public/stockfish/stockfish.worker.js",
     "next-env.d.ts",
   ]),
 ]);

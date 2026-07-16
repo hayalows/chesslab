@@ -3,6 +3,8 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "postinstall": "node scripts/sync-stockfish-assets.mjs",
+    "sync:stockfish": "node scripts/sync-stockfish-assets.mjs",
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
@@ -13,7 +15,8 @@
     "next": "16.2.10",
     "react": "19.2.4",
     "react-chessboard": "^5.10.0",
-    "react-dom": "19.2.4"
+    "react-dom": "19.2.4",
+    "stockfish.wasm": "^0.10.0"
   },
   "devDependencies": {
     "@types/node": "^20",

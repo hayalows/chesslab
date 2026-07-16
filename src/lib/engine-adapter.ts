@@ -1,8 +1,254 @@
 import { Chess } from "chess.js";
-import type { Difficulty, PlayerProfile, SearchMove, SearchResult } from "./game-types";
+import type {
+  Difficulty,
+  EngineStatus,
+  PlayerProfile,
+  SearchMove,
+  SearchResult,
+} from "./game-types";
 
-type PendingSearch = { resolve: (value: SearchResult) => void; reject: (reason: Error) => void };
-type WorkerResponse = { id: number; result?: SearchResult; error?: string };
+type StockfishSettings = {
+  elo: number | null;
+  movetimeMs: number;
+  multiPv: number;
+};
+
+type AnalysisLine = {
+  depth: number;
+  move: string;
+  multipv: number;
+  nodes: number;
+  nps: number;
+  score: number;
+  timeMs: number;
+};
+
+type PendingSearch = {
+  analyses: Map<number, AnalysisLine>;
+  fen: string;
+  reject: (reason: Error) => void;
+  resolve: (result: SearchResult & { bestMove: SearchMove }) => void;
+};
+
+type BridgeMessage =
+  | { type: "bridge-ready" }
+  | { type: "bridge-error"; message: string }
+  | { type: "line"; line: string };
+
+export type EngineStatusListener = (status: EngineStatus, name: string) => void;
+
+export const DIFFICULTY_PRESETS: Record<Exclude<Difficulty, "adaptive">, { elo: number; movetimeMs: number; description: string }> = {
+  easy: { elo: 1350, movetimeMs: 140, description: "A patient club player who still leaves chances." },
+  medium: { elo: 1700, movetimeMs: 280, description: "A confident tournament player with fewer loose moves." },
+  hard: { elo: 2200, movetimeMs: 650, description: "Expert strength with deeper, more precise calculation." },
+};
+
+function adaptiveSettings(profile: PlayerProfile): StockfishSettings {
+  const wins = profile.recentResults.filter((result) => result === "win").length;
+  const losses = profile.recentResults.filter((result) => result === "loss").length;
+  const adjustedLevel = Math.max(1, Math.min(10, profile.adaptiveLevel + Math.sign(wins - losses)));
+  return {
+    elo: 1350 + (adjustedLevel - 1) * 130,
+    movetimeMs: 160 + adjustedLevel * 45,
+    multiPv: 1,
+  };
+}
+
+export function opponentSettings(difficulty: Difficulty, profile: PlayerProfile): StockfishSettings {
+  if (difficulty === "adaptive") return adaptiveSettings(profile);
+  const preset = DIFFICULTY_PRESETS[difficulty];
+  return { elo: preset.elo, movetimeMs: preset.movetimeMs, multiPv: 1 };
+}
+
+export function opponentStrengthLabel(difficulty: Difficulty, profile: PlayerProfile) {
+  const settings = opponentSettings(difficulty, profile);
+  return `${settings.elo} Elo · ${(settings.movetimeMs / 1000).toFixed(2)}s search`;
+}
+
+function valueAfter(tokens: string[], key: string, fallback = 0) {
+  const index = tokens.indexOf(key);
+  return index >= 0 ? Number(tokens[index + 1]) || fallback : fallback;
+}
+
+function parseInfo(line: string): AnalysisLine | null {
+  const tokens = line.trim().split(/\s+/);
+  const pvIndex = tokens.indexOf("pv");
+  const scoreIndex = tokens.indexOf("score");
+  if (pvIndex < 0 || !tokens[pvIndex + 1] || scoreIndex < 0) return null;
+  const scoreKind = tokens[scoreIndex + 1];
+  const rawScore = Number(tokens[scoreIndex + 2]) || 0;
+  const score = scoreKind === "mate" ? Math.sign(rawScore || 1) * (100_000 - Math.abs(rawScore)) : rawScore;
+  return {
+    depth: valueAfter(tokens, "depth"),
+    move: tokens[pvIndex + 1],
+    multipv: valueAfter(tokens, "multipv", 1),
+    nodes: valueAfter(tokens, "nodes"),
+    nps: valueAfter(tokens, "nps"),
+    score,
+    timeMs: valueAfter(tokens, "time"),
+  };
+}
+
+function toSearchMove(fen: string, uci: string, score = 0): SearchMove {
+  const chess = new Chess(fen);
+  const from = uci.slice(0, 2);
+  const to = uci.slice(2, 4);
+  const promotion = uci[4];
+  const move = chess.move({ from, to, promotion: promotion || "q" });
+  if (!move) throw new Error(`Stockfish returned an invalid move: ${uci}`);
+  return {
+    from,
+    to,
+    san: move.san,
+    promotion: move.promotion,
+    captured: move.captured,
+    score,
+  };
+}
+
+class StockfishClient {
+  private worker: Worker | null = null;
+  private engineName = "Stockfish WASM";
+  private initResolve: (() => void) | null = null;
+  private initReject: ((reason: Error) => void) | null = null;
+  private readyResolve: (() => void) | null = null;
+  private pending: PendingSearch | null = null;
+  private queue: Promise<unknown> = Promise.resolve();
+  private disposed = false;
+  private supportsElo = false;
+  private supportsLimitStrength = false;
+  private readonly ready: Promise<void>;
+
+  constructor(private onStatus?: EngineStatusListener) {
+    this.onStatus?.("loading", this.engineName);
+    this.ready = new Promise<void>((resolve, reject) => {
+      this.initResolve = resolve;
+      this.initReject = reject;
+    });
+    void this.ready.catch(() => undefined);
+    if (typeof window === "undefined") return;
+    this.worker = new Worker("/stockfish/rivalmind-stockfish.worker.js");
+    this.worker.onmessage = (event: MessageEvent<BridgeMessage>) => this.handleMessage(event.data);
+    this.worker.onerror = (event) => this.fail(new Error(event.message || "Stockfish WASM could not start in this browser."));
+  }
+
+  private post(command: string) {
+    if (!this.worker || this.disposed) throw new Error("Stockfish is unavailable.");
+    this.worker.postMessage(command);
+  }
+
+  private handleMessage(message: BridgeMessage) {
+    if (message.type === "bridge-error") {
+      this.fail(new Error(message.message));
+      return;
+    }
+    if (message.type === "bridge-ready") {
+      this.post("uci");
+      return;
+    }
+
+    const line = message.line.trim();
+    if (line.startsWith("id name ")) this.engineName = line.slice(8);
+    if (line.startsWith("option name UCI_Elo ")) this.supportsElo = true;
+    if (line.startsWith("option name UCI_LimitStrength ")) this.supportsLimitStrength = true;
+    if (line === "uciok") {
+      if (!this.supportsElo || !this.supportsLimitStrength) {
+        this.fail(new Error("This Stockfish build does not expose Elo strength controls."));
+        return;
+      }
+      this.post("setoption name Threads value 1");
+      this.post("setoption name Hash value 16");
+      this.post("isready");
+      return;
+    }
+    if (line === "readyok") {
+      if (this.initResolve) {
+        this.initResolve();
+        this.initResolve = null;
+        this.initReject = null;
+        this.onStatus?.("ready", this.engineName);
+      } else {
+        this.readyResolve?.();
+        this.readyResolve = null;
+      }
+      return;
+    }
+    if (line.startsWith("info ") && this.pending) {
+      const analysis = parseInfo(line);
+      if (analysis) this.pending.analyses.set(analysis.multipv, analysis);
+      return;
+    }
+    if (line.startsWith("bestmove ") && this.pending) this.finishSearch(line.split(/\s+/)[1]);
+  }
+
+  private fail(error: Error) {
+    this.initReject?.(error);
+    this.initResolve = null;
+    this.initReject = null;
+    this.pending?.reject(error);
+    this.pending = null;
+    this.worker?.terminate();
+    this.worker = null;
+    this.onStatus?.("error", this.engineName);
+  }
+
+  private finishSearch(bestUci: string) {
+    const pending = this.pending;
+    if (!pending) return;
+    this.pending = null;
+    try {
+      const lines = [...pending.analyses.values()].sort((a, b) => a.multipv - b.multipv);
+      const bestLine = lines.find((line) => line.move === bestUci) ?? lines[0];
+      const bestMove = toSearchMove(pending.fen, bestUci, bestLine?.score ?? 0);
+      const candidates = lines.map((line) => toSearchMove(pending.fen, line.move, line.score));
+      if (!candidates.some((move) => move.from === bestMove.from && move.to === bestMove.to)) candidates.unshift(bestMove);
+      pending.resolve({
+        bestMove,
+        candidates,
+        depth: Math.max(0, ...lines.map((line) => line.depth)),
+        engine: this.engineName,
+        nodes: Math.max(0, ...lines.map((line) => line.nodes)),
+        nps: Math.max(0, ...lines.map((line) => line.nps)),
+        timeMs: Math.max(0, ...lines.map((line) => line.timeMs)),
+      });
+    } catch (error) {
+      pending.reject(error instanceof Error ? error : new Error("Stockfish returned an unreadable line."));
+    }
+  }
+
+  private waitUntilReady() {
+    return new Promise<void>((resolve) => {
+      this.readyResolve = resolve;
+      this.post("isready");
+    });
+  }
+
+  search(fen: string, settings: StockfishSettings) {
+    const run = this.queue.then(async () => {
+      await this.ready;
+      this.post(`setoption name MultiPV value ${settings.multiPv}`);
+      this.post(`setoption name UCI_LimitStrength value ${settings.elo === null ? "false" : "true"}`);
+      if (settings.elo !== null) this.post(`setoption name UCI_Elo value ${settings.elo}`);
+      await this.waitUntilReady();
+      return new Promise<SearchResult & { bestMove: SearchMove }>((resolve, reject) => {
+        this.pending = { analyses: new Map(), fen, reject, resolve };
+        this.post(`position fen ${fen}`);
+        this.post(`go movetime ${settings.movetimeMs}`);
+      });
+    });
+    this.queue = run.catch(() => undefined);
+    return run;
+  }
+
+  dispose() {
+    this.disposed = true;
+    try { this.worker?.postMessage("quit"); } catch { /* Worker may already be gone. */ }
+    this.worker?.terminate();
+    this.worker = null;
+    this.pending?.reject(new Error("Stockfish was stopped."));
+    this.pending = null;
+  }
+}
 
 export interface OpponentEngine {
   chooseMove(fen: string, difficulty: Difficulty, profile: PlayerProfile): Promise<SearchResult & { move: SearchMove }>;
@@ -14,85 +260,30 @@ export interface CoachEngine {
   dispose(): void;
 }
 
-class SearchWorkerClient {
-  private worker: Worker | null = null;
-  private nextId = 1;
-  private pending = new Map<number, PendingSearch>();
-
-  constructor() {
-    if (typeof window === "undefined") return;
-    this.worker = new Worker(new URL("../workers/engine.worker.ts", import.meta.url), { type: "module" });
-    this.worker.onmessage = (event: MessageEvent<WorkerResponse>) => {
-      const request = this.pending.get(event.data.id);
-      if (!request) return;
-      this.pending.delete(event.data.id);
-      if (event.data.result) request.resolve(event.data.result);
-      else request.reject(new Error(event.data.error ?? "Engine search failed"));
-    };
-    this.worker.onerror = () => {
-      for (const request of this.pending.values()) request.reject(new Error("Engine worker unavailable"));
-      this.pending.clear();
-    };
-  }
-
-  search(fen: string, depth: number, maxCandidates: number) {
-    if (!this.worker) return Promise.resolve(fallbackSearch(fen));
-    const id = this.nextId++;
-    return new Promise<SearchResult>((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
-      this.worker?.postMessage({ id, fen, depth, maxCandidates });
-    }).catch(() => fallbackSearch(fen));
-  }
-
-  dispose() {
-    this.worker?.terminate();
-    this.worker = null;
-    for (const request of this.pending.values()) request.reject(new Error("Engine disposed"));
-    this.pending.clear();
-  }
-}
-
-function fallbackSearch(fen: string): SearchResult {
-  const candidates = new Chess(fen).moves({ verbose: true }).slice(0, 4).map((move, index) => ({
-    from: move.from,
-    to: move.to,
-    san: move.san,
-    promotion: move.promotion,
-    captured: move.captured,
-    score: -index,
-  }));
-  return { candidates, simulations: candidates.length, depth: 0 };
-}
-
-function settingsFor(difficulty: Difficulty, profile: PlayerProfile) {
-  if (difficulty === "easy") return { depth: 1, pool: 4 };
-  if (difficulty === "medium") return { depth: 2, pool: 2 };
-  if (difficulty === "hard") return { depth: 3, pool: 1 };
-  const wins = profile.recentResults.filter((result) => result === "win").length;
-  const losses = profile.recentResults.filter((result) => result === "loss").length;
-  const effectiveLevel = Math.max(1, Math.min(10, profile.adaptiveLevel + Math.sign(wins - losses)));
-  return effectiveLevel <= 3
-    ? { depth: 1, pool: 4 }
-    : effectiveLevel <= 7
-      ? { depth: 2, pool: 2 }
-      : { depth: 3, pool: 1 };
-}
-
 export class RivalEngine implements OpponentEngine {
-  private client = new SearchWorkerClient();
+  private client: StockfishClient;
+  constructor(onStatus?: EngineStatusListener) { this.client = new StockfishClient(onStatus); }
   async chooseMove(fen: string, difficulty: Difficulty, profile: PlayerProfile) {
-    const settings = settingsFor(difficulty, profile);
-    const result = await this.client.search(fen, settings.depth, Math.max(4, settings.pool));
-    if (!result.candidates.length) throw new Error("No legal reply is available");
-    const pool = result.candidates.slice(0, settings.pool);
-    return { ...result, move: pool[Math.floor(Math.random() * pool.length)] };
+    const result = await this.client.search(fen, opponentSettings(difficulty, profile));
+    return { ...result, move: result.bestMove };
   }
   dispose() { this.client.dispose(); }
 }
 
 export class RivalCoach implements CoachEngine {
-  private client = new SearchWorkerClient();
-  analyze(fen: string) { return this.client.search(fen, 2, 4); }
+  private client: StockfishClient;
+  constructor(onStatus?: EngineStatusListener) { this.client = new StockfishClient(onStatus); }
+  async analyze(fen: string) {
+    const result = await this.client.search(fen, { elo: null, movetimeMs: 700, multiPv: 4 });
+    return {
+      candidates: result.candidates,
+      depth: result.depth,
+      engine: result.engine,
+      nodes: result.nodes,
+      nps: result.nps,
+      timeMs: result.timeMs,
+    };
+  }
   dispose() { this.client.dispose(); }
 }
 

@@ -3,11 +3,18 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Chess, type Square } from "chess.js";
 import { Chessboard, type Arrow } from "react-chessboard";
-import { explainMove, RivalCoach, RivalEngine } from "@/lib/engine-adapter";
+import {
+  DIFFICULTY_PRESETS,
+  explainMove,
+  opponentStrengthLabel,
+  RivalCoach,
+  RivalEngine,
+} from "@/lib/engine-adapter";
 import {
   DEFAULT_PROFILE,
   type CoachLevel,
   type Difficulty,
+  type EngineStatus,
   type GameResult,
   type PlayerProfile,
   type SearchResult,
@@ -57,6 +64,13 @@ function gentleHint(result: SearchResult) {
   return "One of your pieces can become more active without creating a new weakness.";
 }
 
+function evaluationLabel(score: number | undefined) {
+  if (score === undefined) return "—";
+  if (Math.abs(score) > 90_000) return score > 0 ? "Winning mate" : "Mate threat";
+  const pawns = score / 100;
+  return `${pawns >= 0 ? "+" : ""}${pawns.toFixed(2)}`;
+}
+
 export default function RivalMindGame() {
   const gameRef = useRef(new Chess());
   const opponentRef = useRef<RivalEngine | null>(null);
@@ -71,7 +85,10 @@ export default function RivalMindGame() {
   const [thinking, setThinking] = useState(false);
   const [coachThinking, setCoachThinking] = useState(false);
   const [coachResult, setCoachResult] = useState<SearchResult | null>(null);
-  const [lastSearch, setLastSearch] = useState<{ actor: "Rival" | "Coach"; simulations: number; depth: number } | null>(null);
+  const [lastSearch, setLastSearch] = useState<{ actor: "Rival" | "Coach"; nodes: number; depth: number; timeMs: number; engine: string } | null>(null);
+  const [rivalEngineStatus, setRivalEngineStatus] = useState<EngineStatus>("loading");
+  const [coachEngineStatus, setCoachEngineStatus] = useState<EngineStatus>("loading");
+  const [engineName, setEngineName] = useState("Stockfish WASM");
   const [lastMove, setLastMove] = useState<{ from: string; to: string } | null>(null);
   const [moveHistory, setMoveHistory] = useState<string[]>([]);
   const [selectedSquare, setSelectedSquare] = useState<string | null>(null);
@@ -80,8 +97,11 @@ export default function RivalMindGame() {
   const [hintsThisGame, setHintsThisGame] = useState(0);
 
   useEffect(() => {
-    opponentRef.current = new RivalEngine();
-    coachRef.current = new RivalCoach();
+    opponentRef.current = new RivalEngine((status, name) => {
+      setRivalEngineStatus(status);
+      setEngineName(name);
+    });
+    coachRef.current = new RivalCoach((status) => setCoachEngineStatus(status));
     let savedProfile: PlayerProfile | null = null;
     try {
       const saved = window.localStorage.getItem(PROFILE_KEY);
@@ -180,11 +200,11 @@ export default function RivalMindGame() {
       setFen(gameRef.current.fen());
       setMoveHistory(gameRef.current.history());
       setLastMove({ from: result.move.from, to: result.move.to });
-      setLastSearch({ actor: "Rival", simulations: result.simulations, depth: result.depth });
+      setLastSearch({ actor: "Rival", nodes: result.nodes, depth: result.depth, timeMs: result.timeMs, engine: result.engine });
       setMessage(gameRef.current.isCheck() ? "Your king is in check." : "Your move.");
       if (gameRef.current.isGameOver()) finishGame();
     } catch {
-      if (version === gameVersionRef.current) setMessage("Rival paused. Start a new game to reset the board.");
+      if (version === gameVersionRef.current) setMessage("Stockfish could not finish that search. Reload the page to restart the engine.");
     } finally {
       if (version === gameVersionRef.current) setThinking(false);
     }
@@ -235,9 +255,11 @@ export default function RivalMindGame() {
       const result = await coachRef.current?.analyze(gameRef.current.fen());
       if (!result) return;
       setCoachResult(result);
-      setLastSearch({ actor: "Coach", simulations: result.simulations, depth: result.depth });
+      setLastSearch({ actor: "Coach", nodes: result.nodes, depth: result.depth, timeMs: result.timeMs, engine: result.engine });
       setHintsThisGame((count) => count + 1);
       setProfile((current) => ({ ...current, hintUsage: current.hintUsage + 1 }));
+    } catch {
+      setMessage("The Stockfish coach is unavailable. Reload the page to restart it.");
     } finally {
       setCoachThinking(false);
     }
@@ -285,22 +307,23 @@ export default function RivalMindGame() {
             <span className={styles.eyebrow}>Opponent</span>
             <div className={styles.opponentRow}>
               <span className={styles.avatar}>RM</span>
-              <div><h2>Rival</h2><p>Plays Black</p></div>
-              <span className={styles.onlineDot} aria-label="Ready" />
+              <div><h2>Rival</h2><p>Powered by Stockfish</p></div>
+              <span className={rivalEngineStatus === "ready" ? styles.onlineDot : rivalEngineStatus === "error" ? styles.engineErrorDot : styles.thinkingDot} aria-label={`Engine ${rivalEngineStatus}`} />
+            </div>
+            <div className={styles.engineStatus} data-status={rivalEngineStatus}>
+              <span className={styles.engineGlyph}>SF</span>
+              <span><b>{engineName}</b><small>{rivalEngineStatus === "ready" ? "Engine online · every reply verified" : rivalEngineStatus === "error" ? "Engine unavailable · reload to retry" : "Loading the chess engine…"}</small></span>
             </div>
             <label className={styles.fieldLabel} htmlFor="difficulty">Difficulty</label>
             <select id="difficulty" value={difficulty} onChange={(event) => setDifficulty(event.target.value as Difficulty)}>
-              {DIFFICULTIES.map((level) => <option key={level} value={level}>{level[0].toUpperCase() + level.slice(1)}</option>)}
+              {DIFFICULTIES.map((level) => <option key={level} value={level}>{level[0].toUpperCase() + level.slice(1)}{level === "adaptive" ? "" : ` · ${DIFFICULTY_PRESETS[level].elo}`}</option>)}
             </select>
             <p className={styles.supportingCopy}>
               {difficulty === "adaptive"
-                ? `Level ${profile.adaptiveLevel}/10 · adjusts from your last five results.`
-                : difficulty === "easy"
-                  ? "Explores several reasonable replies and sometimes chooses a softer one."
-                  : difficulty === "medium"
-                    ? "Looks two moves ahead with a little variety."
-                    : "Searches deeper and usually chooses its strongest line."}
+                ? `Tracks your last five results and meets you near level ${profile.adaptiveLevel}.`
+                : DIFFICULTY_PRESETS[difficulty].description}
             </p>
+            <div className={styles.searchSpec}><span>Current target</span><b>{opponentStrengthLabel(difficulty, profile)}</b></div>
           </div>
 
           <div className={`${styles.panel} ${styles.movesPanel}`}>
@@ -323,12 +346,12 @@ export default function RivalMindGame() {
                 {DIFFICULTIES.map((level) => <option key={level} value={level}>{level[0].toUpperCase() + level.slice(1)}</option>)}
               </select>
             </label>
-            <button type="button" disabled={coachLevel === "off" || thinking || coachThinking || !playerTurn || gameOver} onClick={() => void askCoach()}>
+            <button type="button" disabled={coachLevel === "off" || coachEngineStatus !== "ready" || thinking || coachThinking || !playerTurn || gameOver} onClick={() => void askCoach()}>
               {coachThinking ? "Thinking…" : "Ask coach"}
             </button>
           </div>
           <div className={styles.playerStrip}>
-            <div><span className={styles.miniAvatar}>RM</span><span><b>Rival</b><small>{difficulty} · Black</small></span></div>
+            <div><span className={styles.miniAvatar}>SF</span><span><b>Rival</b><small>Stockfish · {difficulty}</small></span></div>
             <div className={styles.stripActions}>
               <span className={styles.turnPill}>{thinking ? "Thinking" : !playerTurn ? "To move" : "Waiting"}</span>
               <button className={styles.inlineNewGame} type="button" onClick={newGame} aria-label="Start a new game" title="Start a new game">↻</button>
@@ -367,15 +390,15 @@ export default function RivalMindGame() {
           <div className={styles.thinkingLine} aria-live="polite">
             <span className={statusTone} />
             <b>{message}</b>
-            {lastSearch && <span>{lastSearch.actor} considered {lastSearch.simulations.toLocaleString()} positions · depth {lastSearch.depth}</span>}
+            {lastSearch && <span>{lastSearch.actor} searched {lastSearch.nodes.toLocaleString()} nodes · depth {lastSearch.depth} · {(lastSearch.timeMs / 1000).toFixed(2)}s</span>}
           </div>
         </section>
 
         <aside className={styles.rightRail}>
           <div className={`${styles.panel} ${styles.coachPanel}`}>
             <div className={styles.coachHeading}>
-              <div><span className={styles.eyebrow}>Coach</span><h2>A second mind, on your side.</h2></div>
-              <span className={styles.coachIcon}>C</span>
+              <div><span className={styles.eyebrow}>Stockfish coach</span><h2>A second mind, on your side.</h2></div>
+              <span className={styles.coachIcon}>SF</span>
             </div>
             <div className={styles.segmented} aria-label="Coach detail level">
               {COACH_LEVELS.map((level) => (
@@ -402,13 +425,14 @@ export default function RivalMindGame() {
                     ))}
                   </div>
                   <p><b>{coachResult.candidates[0]?.san}</b> — {coachResult.candidates[0] && explainMove(coachResult.candidates[0])}</p>
+                  <div className={styles.coachTelemetry}><span>Evaluation <b>{evaluationLabel(coachResult.candidates[0]?.score)}</b></span><span>Depth <b>{coachResult.depth}</b></span></div>
                 </div>
               )}
             </div>
-            <button type="button" className={styles.coachButton} disabled={coachLevel === "off" || thinking || coachThinking || !playerTurn || gameOver} onClick={() => void askCoach()}>
-              {coachThinking ? "Considering…" : "Ask coach"}<span>↗</span>
+            <button type="button" className={styles.coachButton} disabled={coachLevel === "off" || coachEngineStatus !== "ready" || thinking || coachThinking || !playerTurn || gameOver} onClick={() => void askCoach()}>
+              {coachEngineStatus === "loading" ? "Starting Stockfish…" : coachEngineStatus === "error" ? "Coach unavailable" : coachThinking ? "Analyzing…" : "Analyze with Stockfish"}<span>↗</span>
             </button>
-            <p className={styles.simCount}>{coachResult ? `${coachResult.simulations.toLocaleString()} positions considered` : `${profile.hintUsage} lifetime hints used`}</p>
+            <p className={styles.simCount}>{coachResult ? `${coachResult.nodes.toLocaleString()} nodes · ${coachResult.nps.toLocaleString()} nodes/sec` : `${profile.hintUsage} lifetime hints used`}</p>
           </div>
 
           <div className={styles.profilePanel}>
@@ -420,7 +444,7 @@ export default function RivalMindGame() {
         </aside>
       </section>
 
-      <footer><span>RivalMind · Private practice, stored on this device.</span><span>Legal moves powered by chess.js</span></footer>
+      <footer><span>RivalMind · Private practice, stored on this device.</span><span><a href="https://github.com/lichess-org/stockfish.wasm" target="_blank" rel="noreferrer">Stockfish WASM</a> engine · legal moves by chess.js</span></footer>
 
       {summary && (
         <div className={styles.modalBackdrop} role="presentation">

@@ -13,9 +13,14 @@ export type SearchMove = {
 
 export type SearchResult = {
   candidates: SearchMove[];
-  simulations: number;
+  nodes: number;
   depth: number;
+  timeMs: number;
+  nps: number;
+  engine: string;
 };
+
+export type EngineStatus = "loading" | "ready" | "error";
 
 export type PlayerProfile = {
   games: number;

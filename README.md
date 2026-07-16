@@ -17,9 +17,11 @@ Open [http://localhost:3000](http://localhost:3000).
 
 - Legal drag-and-drop and click-to-move play powered by `chess.js`
 - Easy, medium, hard, and understandable adaptive difficulty
-- Separate opponent and coach engine adapters
+- Separate Stockfish opponent and coach engine adapters
 - Gentle hints, candidate moves, best move, plain-English reasoning, and visible search counts
 - Local games, record, hint usage, recent results, and adaptive level
 - Short post-game coaching summary
 
-The current engine is a compact alpha-beta search running in web workers. `OpponentEngine` and `CoachEngine` interfaces keep a future Stockfish upgrade isolated from the game UI.
+Every computer reply and coach analysis now runs through the threaded [`lichess-org/stockfish.wasm`](https://github.com/lichess-org/stockfish.wasm) engine using the UCI protocol. Difficulty uses Stockfish's `UCI_LimitStrength` and `UCI_Elo` controls plus a bounded search time; coaching runs at full strength with MultiPV candidate lines. RivalMind shows real nodes, depth, elapsed search time, evaluation, and engine readiness rather than simulated telemetry.
+
+The requested compatibility build uses Stockfish's classical evaluation rather than a current NNUE network. The distributed engine is GPL-3.0; its license is served with the WASM assets at `/stockfish/Copying.txt`, and source is available from the linked upstream repository.
