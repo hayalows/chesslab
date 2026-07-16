@@ -28,6 +28,8 @@ import {
   type PlayerSide,
   type PostGameSummary,
   type TimeControl,
+  type SessionMode,
+  type CustomTimeSettings,
 } from "@/lib/game-types";
 import { canRevealCoachStep, coachCacheMode, isPlayerTurn } from "@/lib/game-session";
 import GameAssistant from "./GameAssistant";
@@ -43,7 +45,7 @@ import styles from "./RivalMindGame.module.css";
 
 const PROFILE_KEY = "rivalmind-player-profile-v1";
 const DIFFICULTIES: Difficulty[] = ["beginner", "easy", "medium", "hard", "expert", "master", "adaptive"];
-const TIME_OPTIONS = Object.keys(TIME_CONTROLS) as TimeControl[];
+const TIME_OPTIONS: TimeControl[] = ["open", "blitz5", "rapid10", "steady15", "custom"];
 const RATED_DIFFICULTIES: Exclude<Difficulty, "adaptive">[] = ["beginner", "easy", "medium", "hard", "expert", "master"];
 const SIDE_OPTIONS: { value: PlayerSide; label: string; detail: string }[] = [
   { value: "white", label: "White", detail: "You make the first move" },
@@ -108,7 +110,7 @@ function nextTournamentDifficulty(difficulty: Difficulty) {
   return RATED_DIFFICULTIES[Math.min(RATED_DIFFICULTIES.length - 1, RATED_DIFFICULTIES.indexOf(difficulty) + 1)];
 }
 
-export default function RivalMindGame({ timeControl: initialTimeControl = "open" }: { timeControl?: TimeControl }) {
+export default function RivalMindGame({ timeControl: initialTimeControl = "open", sessionMode: initialSessionMode = "training", customTime: initialCustomTime = { minutes: 20, incrementSeconds: 5 } }: { timeControl?: TimeControl; sessionMode?: SessionMode; customTime?: CustomTimeSettings }) {
   const gameRef = useRef(new Chess());
   const opponentRef = useRef<RivalEngine | null>(null);
   const assistantRef = useRef<RivalAssistant | null>(null);
@@ -128,13 +130,15 @@ export default function RivalMindGame({ timeControl: initialTimeControl = "open"
   const consultationRef = useRef<{ ply: number; coachLevel: CoachLevel; shownMoves: string[]; shownSans: string[]; playerIdea?: string } | null>(null);
   const [fen, setFen] = useState(() => new Chess().fen());
   const [timeControl, setTimeControl] = useState<TimeControl>(initialTimeControl);
+  const [customMinutes, setCustomMinutes] = useState(initialCustomTime.minutes);
+  const [customIncrement, setCustomIncrement] = useState(initialCustomTime.incrementSeconds);
   const [difficulty, setDifficulty] = useState<Difficulty>("medium");
   const [sideChoice, setSideChoice] = useState<PlayerSide>("white");
   const [playerColor, setPlayerColor] = useState<PlayerColor>("w");
   const [gameActive, setGameActive] = useState(false);
   const [gameFinished, setGameFinished] = useState(false);
   const [setupOpen, setSetupOpen] = useState(true);
-  const [sessionMode, setSessionMode] = useState<"single" | "cup">("single");
+  const [sessionMode, setSessionMode] = useState<SessionMode>(initialSessionMode);
   const [cupRound, setCupRound] = useState(1);
   const [cupScore, setCupScore] = useState(0);
   const [coachLevel, setCoachLevel] = useState<CoachLevel>("gentle");
@@ -262,7 +266,9 @@ export default function RivalMindGame({ timeControl: initialTimeControl = "open"
   const renderGame = useMemo(() => new Chess(fen), [fen]);
   const gameOver = renderGame.isGameOver() || gameFinished;
   const playerTurn = isPlayerTurn(renderGame.turn(), playerColor);
-  const clock = useGameClock(timeControl, renderGame.turn(), gameActive && rivalEngineStatus === "ready" && profileReady && !gameOver, (color) => finishGame(color === playerColor ? "loss" : "win"));
+  const customTime = useMemo(() => ({ minutes: customMinutes, incrementSeconds: customIncrement }), [customMinutes, customIncrement]);
+  const activeTimeLabel = timeControl === "custom" ? `${customMinutes} + ${customIncrement}` : TIME_CONTROLS[timeControl].label;
+  const clock = useGameClock(timeControl, renderGame.turn(), gameActive && rivalEngineStatus === "ready" && profileReady && !gameOver, (color) => finishGame(color === playerColor ? "loss" : "win"), customTime);
   const resetClock = clock.reset;
   const rivalColor: Color = playerColor === "w" ? "b" : "w";
   const playerClock = playerColor === "w" ? clock.whiteMs : clock.blackMs;
@@ -331,7 +337,7 @@ export default function RivalMindGame({ timeControl: initialTimeControl = "open"
     }
   }
 
-  async function requestRivalMove(position: string, activePlayerColor = playerColor, activeDifficulty = difficulty) {
+  async function requestRivalMove(position: string, activePlayerColor = playerColor, activeDifficulty = difficulty, liveAssistant = assistantEnabled) {
     const version = gameVersionRef.current;
     const rivalStartedAt = currentTimeMs();
     setThinking(true);
@@ -353,7 +359,7 @@ export default function RivalMindGame({ timeControl: initialTimeControl = "open"
       setMessage(gameRef.current.isCheck() ? "Your king is in check." : "Your move.");
       playerTurnStartedAtRef.current = currentTimeMs();
       const finalPosition = gameRef.current.fen();
-      const analysis = updateAssistant(finalPosition, "Rival", rivalSan, gameRef.current.history().length, gameRef.current.isGameOver(), activePlayerColor);
+      const analysis = updateAssistant(finalPosition, "Rival", rivalSan, gameRef.current.history().length, gameRef.current.isGameOver() || liveAssistant, activePlayerColor);
       if (gameRef.current.isGameOver()) void analysis.finally(() => finishGame());
     } catch {
       if (version === gameVersionRef.current) setMessage("Stockfish could not finish that search. Reload the page to restart the engine.");
@@ -524,28 +530,31 @@ export default function RivalMindGame({ timeControl: initialTimeControl = "open"
     setMessage(activePlayerColor === "w" ? "Your move. You are playing White." : "Rival opens. You are playing Black.");
   }
 
-  function beginConfiguredGame(activeDifficulty = difficulty) {
+  function beginConfiguredGame(activeDifficulty = difficulty, liveHelp = assistantEnabled) {
     const activePlayerColor: PlayerColor = sideChoice === "random" ? randomPlayerColor() : sideChoice === "white" ? "w" : "b";
     setPlayerColor(activePlayerColor);
     resetGameState(activePlayerColor);
     setSetupOpen(false);
     setGameActive(true);
-    if (assistantEnabled) void updateAssistant(gameRef.current.fen(), "Start", undefined, 0, false, activePlayerColor);
+    if (liveHelp) void updateAssistant(gameRef.current.fen(), "Start", undefined, 0, true, activePlayerColor);
     if (activePlayerColor === "b") {
-      window.setTimeout(() => void requestRivalMove(gameRef.current.fen(), activePlayerColor, activeDifficulty), 0);
+      window.setTimeout(() => void requestRivalMove(gameRef.current.fen(), activePlayerColor, activeDifficulty, liveHelp), 0);
     }
   }
 
   function startConfiguredGame() {
     if (sessionMode === "cup") { setCupRound(1); setCupScore(0); }
-    beginConfiguredGame();
+    const liveHelp = sessionMode === "training";
+    setAssistantEnabled(true);
+    setCoachLevel(liveHelp ? "gentle" : "off");
+    beginConfiguredGame(difficulty, true);
   }
 
   function continueTournament() {
     const nextDifficulty = nextTournamentDifficulty(difficulty);
     setCupRound((round) => Math.min(3, round + 1));
     setDifficulty(nextDifficulty);
-    beginConfiguredGame(nextDifficulty);
+    beginConfiguredGame(nextDifficulty, true);
   }
 
   function openGameSetup() {
@@ -567,13 +576,13 @@ export default function RivalMindGame({ timeControl: initialTimeControl = "open"
   const summaryCalibration = summary ? confidenceCalibration(summary.decisions) : null;
 
   return (
-    <main className={styles.shell}>
+    <main className={`${styles.shell} ${sessionMode === "training" ? "" : styles.focusedMode}`}>
       <header className={styles.header}>
         <Link className={styles.brand} href="/" aria-label="RivalMind home">
           <span className={styles.mark} aria-hidden="true"><i /><i /><i /></span>
           RivalMind
         </Link>
-        <p>{gameActive ? `${TIME_CONTROLS[timeControl].label} · You play ${playerColor === "w" ? "White" : "Black"}` : "Choose your training session"}</p>
+        <p>{gameActive ? `${activeTimeLabel} · You play ${playerColor === "w" ? "White" : "Black"}` : "Choose how you want to play"}</p>
         <div className={styles.headerStats} aria-label="Player record">
           <span><b>{profile.games}</b> games</span>
           <span><b>{profile.wins}</b> wins</span>
@@ -680,6 +689,7 @@ export default function RivalMindGame({ timeControl: initialTimeControl = "open"
         </section>
 
         <aside className={styles.rightRail}>
+          {sessionMode !== "training" && <div className={`${styles.panel} ${styles.focusedNotice}`}><span className={styles.eyebrow}>{sessionMode === "cup" ? `Tournament · Round ${cupRound}` : "Focused game"}</span><h2>Live help is off.</h2><p>Play from your own ideas. RivalMind is quietly recording the game so your review is ready when it ends.</p><button type="button" onClick={openGameSetup}>Change mode</button></div>}
           <div className={`${styles.panel} ${styles.coachPanel}`}>
             <div className={styles.coachHeading}>
               <div><span className={styles.eyebrow}>Optional coach</span><h2>How much help would you like?</h2></div>
@@ -769,14 +779,19 @@ export default function RivalMindGame({ timeControl: initialTimeControl = "open"
       {setupOpen && (
         <div className={styles.modalBackdrop} role="presentation">
           <section className={styles.setupCard} role="dialog" aria-modal="true" aria-labelledby="setup-title">
-            <div className={styles.setupHeading}><span className={styles.eyebrow}>New training game</span><h2 id="setup-title">Choose the lesson you want.</h2><p>Set the color, pace, and rival before the clock starts.</p></div>
+            <div className={styles.setupHeading}><span className={styles.eyebrow}>New game</span><h2 id="setup-title">How do you want to play?</h2><p>Choose the experience first, then set your color, clock, and Rival.</p></div>
             <div className={styles.setupIdentity}><span className={styles.naviiAvatar}><Navii seed={profile.avatarSeed} size={40} title={profile.displayName} background="ring" /></span><label htmlFor="training-name"><b>Your training name</b><input id="training-name" maxLength={60} value={profile.displayName} onChange={(event) => setProfile((current) => ({ ...current, displayName: event.target.value }))} /></label><button type="button" onClick={() => setProfile((current) => ({ ...current, avatarSeed: uniqueAvatarSeed() }))}>New icon</button></div>
-            <fieldset className={styles.setupSection}><legend>Session</legend><div className={styles.sessionChoices}><button type="button" aria-pressed={sessionMode === "single"} onClick={() => setSessionMode("single")}><b>Single game</b><span>One focused lesson and review</span></button><button type="button" aria-pressed={sessionMode === "cup"} onClick={() => setSessionMode("cup")}><b>Training Cup</b><span>Three rounds · rival gets stronger</span></button></div></fieldset>
+            <fieldset className={styles.setupSection}><legend>Experience</legend><div className={styles.sessionChoices}>
+              <button type="button" aria-pressed={sessionMode === "game"} onClick={() => setSessionMode("game")}><b>Play</b><span>No live help. Review the game afterward.</span></button>
+              <button type="button" aria-pressed={sessionMode === "training"} onClick={() => setSessionMode("training")}><b>Train</b><span>Coach and explanations during the game.</span></button>
+              <button type="button" aria-pressed={sessionMode === "cup"} onClick={() => setSessionMode("cup")}><b>Tournament</b><span>Three rounds. The Rival gets stronger.</span></button>
+            </div><p className={styles.modeNote}>{sessionMode === "training" ? "Live learning is on. You decide how much help to reveal." : sessionMode === "cup" ? "Tournament games hide live assistance. Each round still receives a full review." : "This feels like a real game. The coach and live assistant stay off until your review."}</p></fieldset>
             <fieldset className={styles.setupSection}><legend>Your side</legend><div className={styles.choiceGrid}>{SIDE_OPTIONS.map((option) => <button type="button" key={option.value} aria-pressed={sideChoice === option.value} onClick={() => setSideChoice(option.value)}><b>{option.label}</b><span>{option.detail}</span></button>)}</div></fieldset>
             <fieldset className={styles.setupSection}><legend>Time</legend><div className={styles.timeGrid}>{TIME_OPTIONS.map((option) => <button type="button" key={option} aria-pressed={timeControl === option} onClick={() => setTimeControl(option)}><b>{TIME_CONTROLS[option].short}</b><span>{TIME_CONTROLS[option].label}</span></button>)}</div></fieldset>
+            {timeControl === "custom" && <div className={styles.customTimeFields}><label htmlFor="custom-minutes"><span>Minutes per player</span><input id="custom-minutes" type="number" min="1" max="180" value={customMinutes} onChange={(event) => setCustomMinutes(Math.max(1, Math.min(180, Number(event.target.value) || 1)))} /></label><label htmlFor="custom-increment"><span>Increment after each move</span><div><input id="custom-increment" type="number" min="0" max="60" value={customIncrement} onChange={(event) => setCustomIncrement(Math.max(0, Math.min(60, Number(event.target.value) || 0)))} /><small>seconds</small></div></label></div>}
             <label className={styles.setupField} htmlFor="setup-difficulty"><span>Rival strength</span><select id="setup-difficulty" value={difficulty} onChange={(event) => setDifficulty(event.target.value as Difficulty)}>{DIFFICULTIES.map((level) => <option key={level} value={level}>{level === "adaptive" ? `Adaptive · current level ${profile.adaptiveLevel}` : `${level[0].toUpperCase() + level.slice(1)} · ${DIFFICULTY_PRESETS[level].elo} Elo`}</option>)}</select><small>{difficulty === "adaptive" ? "Uses your unassisted move quality and recent results to choose the next challenge." : DIFFICULTY_PRESETS[difficulty].description}</small></label>
-            <div className={styles.setupSummary}><span>Ready to train</span><b>{sessionMode === "cup" ? "3-round Training Cup · " : ""}{TIME_CONTROLS[timeControl].label} · {sideChoice === "random" ? "Random color" : sideChoice} · {difficulty}</b></div>
-            <button className={styles.startGameButton} type="button" disabled={rivalEngineStatus !== "ready" || !profileReady || !profile.displayName.trim()} onClick={startConfiguredGame}>{rivalEngineStatus === "ready" ? "Start game" : "Getting Stockfish ready…"}</button>
+            <div className={styles.setupSummary}><span>Your setup</span><b>{sessionMode === "cup" ? "Tournament" : sessionMode === "training" ? "Training" : "Game"} · {activeTimeLabel} · {sideChoice === "random" ? "Random color" : sideChoice} · {difficulty}</b></div>
+            <button className={styles.startGameButton} type="button" disabled={rivalEngineStatus !== "ready" || !profileReady || !profile.displayName.trim()} onClick={startConfiguredGame}>{rivalEngineStatus === "ready" ? sessionMode === "cup" ? "Enter tournament" : sessionMode === "training" ? "Start training" : "Start game" : "Getting Stockfish ready…"}</button>
           </section>
         </div>
       )}

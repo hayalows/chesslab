@@ -5,6 +5,7 @@ export const TIME_CONTROLS: Record<TimeControl, { label: string; short: string; 
   blitz5: { label: "5 minute game", short: "5 min", initialMs: 5 * 60_000, incrementMs: 0, description: "Five minutes each. Train quick, disciplined decisions." },
   rapid10: { label: "10 minute game", short: "10 min", initialMs: 10 * 60_000, incrementMs: 0, description: "A focused game with ten minutes each." },
   steady15: { label: "15 + 10 training", short: "15 + 10", initialMs: 15 * 60_000, incrementMs: 10_000, description: "Fifteen minutes each, plus ten seconds per move." },
+  custom: { label: "Custom clock", short: "Custom", initialMs: 20 * 60_000, incrementMs: 5_000, description: "Choose the starting time and increment for each player." },
 };
 
 export const MILESTONES = [

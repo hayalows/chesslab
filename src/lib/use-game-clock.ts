@@ -2,11 +2,13 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Color } from "chess.js";
-import type { TimeControl } from "./game-types";
+import type { CustomTimeSettings, TimeControl } from "./game-types";
 import { TIME_CONTROLS } from "./training-analytics";
 
-export function useGameClock(timeControl: TimeControl, active: Color, running: boolean, onFlag: (color: Color) => void) {
-  const settings = TIME_CONTROLS[timeControl];
+export function useGameClock(timeControl: TimeControl, active: Color, running: boolean, onFlag: (color: Color) => void, custom?: CustomTimeSettings) {
+  const settings = timeControl === "custom" && custom
+    ? { ...TIME_CONTROLS.custom, initialMs: custom.minutes * 60_000, incrementMs: custom.incrementSeconds * 1_000 }
+    : TIME_CONTROLS[timeControl];
   const [whiteMs, setWhiteMs] = useState<number | null>(settings.initialMs);
   const [blackMs, setBlackMs] = useState<number | null>(settings.initialMs);
   const lastTickRef = useRef(0);
