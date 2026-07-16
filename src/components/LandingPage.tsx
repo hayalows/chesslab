@@ -17,6 +17,7 @@ export default function LandingPage() {
     <section className={styles.loop} id="how"><span>Every move follows one clear loop</span><div><b>1</b><p><strong>Play</strong>Make your own decision.</p><i>→</i><b>2</b><p><strong>Understand</strong>See what changed and why.</p><i>→</i><b>3</b><p><strong>Improve</strong>Build a training path that fits you.</p></div></section>
     <section className={styles.choose} id="choose"><div className={styles.sectionCopy}><span>CHOOSE YOUR SESSION</span><h2>Train at your pace.</h2><p>Start as a guest. Your board, coach and game assistant work immediately.</p></div><div className={styles.modeGrid}>
       <Link href="/play?time=open"><span>LEARN</span><h3>Open practice</h3><p>No clock. Pause, think and use the coach when you need it.</p><b>Play without a clock <i>→</i></b></Link>
+      <Link href="/play?time=blitz5"><span>QUICK THINKING</span><h3>5 minute game</h3><p>Five minutes each. Train fast scans without rushing blindly.</p><b>Play 5 minutes <i>→</i></b></Link>
       <Link href="/play?time=rapid10"><span>FOCUS</span><h3>10 minute game</h3><p>Ten minutes each. Enough pressure to practice real decisions.</p><b>Play 10 minutes <i>→</i></b></Link>
       <Link href="/play?time=steady15"><span>DEEP WORK</span><h3>15 + 10 training</h3><p>Fifteen minutes plus ten seconds per move for careful chess.</p><b>Play 15 + 10 <i>→</i></b></Link>
     </div></section>

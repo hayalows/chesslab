@@ -1,6 +1,6 @@
 import { Chess } from "chess.js";
 import { explainMove } from "./engine-adapter";
-import type { AssistantSnapshot, GameResult, GameTelemetry, GameTermination, PostGameSummary } from "./game-types";
+import type { AssistantSnapshot, GameResult, GameTelemetry, GameTermination, MoveDecision, PlayerColor, PostGameSummary } from "./game-types";
 
 export function describeOutcome(game: Chess, result: GameResult, endedOnTime = false) {
   const outcomeTitle = result === "win" ? "You won" : result === "loss" ? "You lost" : "Game drawn";
@@ -37,10 +37,12 @@ export function createPostGameSummary(args: {
   endedOnTime?: boolean;
   telemetry: GameTelemetry;
   timeline: AssistantSnapshot[];
+  decisions?: MoveDecision[];
+  playerColor?: PlayerColor;
   newMilestones: string[];
 }): PostGameSummary {
   const { game, result, telemetry, timeline, newMilestones } = args;
-  const playerMoves = game.history({ verbose: true }).filter((_, index) => index % 2 === 0);
+  const playerMoves = game.history({ verbose: true }).filter((_, index) => index % 2 === (args.playerColor === "b" ? 1 : 0));
   const castled = playerMoves.some((move) => move.san === "O-O" || move.san === "O-O-O");
   const decisions = timeline.filter((item) => item.actor === "You");
   const steadyDecisions = decisions.filter((item) => item.severity === "steady").length;
@@ -72,5 +74,6 @@ export function createPostGameSummary(args: {
     keyMoment,
     telemetry,
     newMilestones,
+    decisions: args.decisions ?? [],
   };
 }

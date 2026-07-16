@@ -1,5 +1,5 @@
 import { confidence, explainCandidate, healthScore, outlook, phaseLabel, tacticalRadar } from "@/lib/assistant-insights";
-import type { AssistantSnapshot, EngineStatus } from "@/lib/game-types";
+import type { AssistantSnapshot, EngineStatus, MoveDecision, PlayerColor } from "@/lib/game-types";
 import styles from "./RivalMindGame.module.css";
 
 type Props = {
@@ -9,20 +9,27 @@ type Props = {
   thinking: boolean;
   latest: AssistantSnapshot | null;
   timeline: AssistantSnapshot[];
+  decisions: MoveDecision[];
+  playerColor: PlayerColor;
 };
 
-function evaluation(score: number) {
-  if (Math.abs(score) > 90_000) return score > 0 ? "White has mate" : "Black has mate";
+function evaluation(score: number, mate?: number) {
+  if (mate !== undefined) return `${mate > 0 ? "Mate in" : "Mated in"} ${Math.abs(mate)}`;
+  if (Math.abs(score) > 90_000) return score > 0 ? "White has a forced mate" : "Black has a forced mate";
   return `${score >= 0 ? "+" : ""}${(score / 100).toFixed(2)}`;
 }
 
-export default function GameAssistant({ enabled, onToggle, status, thinking, latest, timeline }: Props) {
+export default function GameAssistant({ enabled, onToggle, status, thinking, latest, timeline, decisions, playerColor }: Props) {
   const result = latest?.result ?? null;
   const main = result?.candidates[0];
   const view = result && latest ? outlook(result, latest.fen) : null;
   const radar = tacticalRadar(main);
   const certainty = result ? confidence(result) : null;
   const mistakes = timeline.filter((item) => item.actor === "You" && item.ply > 0);
+  const independent = decisions.filter((item) => item.source === "independent");
+  const assisted = decisions.length - independent.length;
+  const independentRate = decisions.length ? Math.round(independent.length / decisions.length * 100) : 100;
+  const playerMate = main?.mate === undefined ? undefined : main.mate * (latest?.fen.split(" ")[1] === playerColor ? 1 : -1);
 
   return (
     <section className={`${styles.panel} ${styles.assistantPanel}`} aria-label="RivalMind game assistant">
@@ -37,7 +44,13 @@ export default function GameAssistant({ enabled, onToggle, status, thinking, lat
             : <>
               <div className={styles.positionHero}>
                 <div className={styles.healthRing} style={{ "--health": `${healthScore(latest.whiteScore) * 3.6}deg` } as React.CSSProperties}><span>{healthScore(latest.whiteScore)}</span><small>health</small></div>
-                <div><span className={styles.phasePill}>{phaseLabel(latest.fen)}</span><h3>{latest.explanation}</h3><p>White evaluation {evaluation(latest.whiteScore)} · {result.nodes.toLocaleString()} positions considered</p></div>
+                <div><span className={styles.phasePill}>{phaseLabel(latest.fen)}</span><h3>{latest.explanation}</h3><p>Your position {evaluation(playerColor === "w" ? latest.whiteScore : -latest.whiteScore, playerMate)} · {result.nodes.toLocaleString()} positions considered</p></div>
+              </div>
+
+              <div className={styles.independenceLive}>
+                <div><span>Coach independence</span><b>{independentRate}%</b><small>{independent.length} own decisions · {assisted} with help</small></div>
+                <i><em style={{ width: `${independentRate}%` }} /></i>
+                <p>Your independent moves are the main signal used to estimate your real playing strength.</p>
               </div>
 
               {view && <div className={styles.outlook} aria-label="Position outlook">
@@ -53,7 +66,10 @@ export default function GameAssistant({ enabled, onToggle, status, thinking, lat
 
               <details className={styles.insightCard}>
                 <summary><span><b>Other moves to consider</b></span><em>{result.candidates.length} ideas</em></summary>
-                <div className={styles.alternatives}>{result.candidates.slice(0, 3).map((move, index) => <div key={move.uci}><span>{index + 1}</span><p><b>{move.san}</b>{explainCandidate(move, main?.score ?? move.score, index)}</p><em>{evaluation(latest.fen.split(" ")[1] === "w" ? move.score : -move.score)}</em></div>)}</div>
+                <div className={styles.alternatives}>{result.candidates.slice(0, 3).map((move, index) => {
+                  const fromPlayerSide = latest.fen.split(" ")[1] === playerColor;
+                  return <div key={move.uci}><span>{index + 1}</span><p><b>{move.san}</b>{explainCandidate(move, main?.score ?? move.score, index)}</p><em>{evaluation(fromPlayerSide ? move.score : -move.score, move.mate === undefined ? undefined : move.mate * (fromPlayerSide ? 1 : -1))}</em></div>;
+                })}</div>
               </details>
 
               <details className={styles.insightCard}>

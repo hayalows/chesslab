@@ -1,5 +1,5 @@
 import { Chess } from "chess.js";
-import type { AssistantSnapshot, SearchMove, SearchResult } from "./game-types";
+import type { AssistantSnapshot, PlayerColor, SearchMove, SearchResult } from "./game-types";
 
 export function whiteScore(fen: string, score: number) {
   return fen.split(" ")[1] === "w" ? score : -score;
@@ -77,9 +77,11 @@ export function buildSnapshot(args: {
   move?: string;
   result: SearchResult;
   previousWhiteScore?: number;
+  playerColor?: PlayerColor;
 }): AssistantSnapshot {
   const score = whiteScore(args.fen, args.result.candidates[0]?.score ?? 0);
-  const delta = args.previousWhiteScore === undefined ? 0 : score - args.previousWhiteScore;
+  const whiteDelta = args.previousWhiteScore === undefined ? 0 : score - args.previousWhiteScore;
+  const delta = whiteDelta * (args.playerColor === "b" ? -1 : 1);
   const severity = args.actor === "You" ? severityFromDelta(delta) : "steady";
   const main = args.result.candidates[0];
   const amount = Math.abs(delta / 100).toFixed(2);

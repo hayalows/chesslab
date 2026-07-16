@@ -17,6 +17,7 @@ export default function AuthMenu({ triggerLabel = "Save progress", redirectTo = 
   const [open, setOpen] = useState(false);
   const [mode, setMode] = useState<AuthMode>("sign-in");
   const [email, setEmail] = useState("");
+  const [displayName, setDisplayName] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [notice, setNotice] = useState("");
@@ -53,6 +54,7 @@ export default function AuthMenu({ triggerLabel = "Save progress", redirectTo = 
   async function submit() {
     if (!supabase || !email.trim()) { setNotice("Enter your email address."); return; }
     if (password.length < 8) { setNotice("Use at least 8 characters for your password."); return; }
+    if (mode === "sign-up" && !displayName.trim()) { setNotice("Choose the name you want on your training profile."); return; }
     if (mode === "sign-up" && password !== confirmPassword) { setNotice("Those passwords do not match yet."); return; }
 
     setSending(true);
@@ -65,7 +67,7 @@ export default function AuthMenu({ triggerLabel = "Save progress", redirectTo = 
       const { data, error } = await supabase.auth.signUp({
         email: email.trim(),
         password,
-        options: { emailRedirectTo: callback() },
+        options: { emailRedirectTo: callback(), data: { display_name: displayName.trim() } },
       });
       if (error) setNotice(friendlyAuthError(error));
       else if (data.session) window.location.assign(redirectTo);
@@ -106,6 +108,7 @@ export default function AuthMenu({ triggerLabel = "Save progress", redirectTo = 
           <button type="button" aria-pressed={mode === "sign-up"} onClick={() => changeMode("sign-up")}>Create account</button>
         </div>
 
+        {mode === "sign-up" && <><label htmlFor="rivalmind-name">Training name</label><input id="rivalmind-name" type="text" autoComplete="nickname" maxLength={60} value={displayName} onChange={(event) => setDisplayName(event.target.value)} placeholder="How should RivalMind address you?" /></>}
         <label htmlFor="rivalmind-email">Email address</label>
         <input id="rivalmind-email" autoFocus type="email" autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@example.com" />
         <label htmlFor="rivalmind-password">Password</label>

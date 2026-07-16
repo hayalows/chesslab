@@ -1,8 +1,9 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Chess, type Square } from "chess.js";
+import { Chess, type Color, type Square } from "chess.js";
 import { Chessboard, type Arrow } from "react-chessboard";
+import { Navii } from "@usenavii/react";
 import Link from "next/link";
 import {
   DIFFICULTY_PRESETS,
@@ -23,6 +24,9 @@ import {
   type SearchResult,
   type AssistantSnapshot,
   type GameTelemetry,
+  type MoveDecision,
+  type PlayerColor,
+  type PlayerSide,
   type PostGameSummary,
   type TimeControl,
 } from "@/lib/game-types";
@@ -32,10 +36,18 @@ import { loadCloudProfile, syncCompletedGame } from "@/lib/cloud-sync";
 import { adaptiveProgress, advanceProfile, formatClock, formatDuration, learningScore, TIME_CONTROLS } from "@/lib/training-analytics";
 import { useGameClock } from "@/lib/use-game-clock";
 import { createPostGameSummary } from "@/lib/post-game-summary";
+import { currentTimeMs, randomPlayerColor, uniqueAvatarSeed } from "@/lib/runtime-values";
 import styles from "./RivalMindGame.module.css";
 
 const PROFILE_KEY = "rivalmind-player-profile-v1";
-const DIFFICULTIES: Difficulty[] = ["easy", "medium", "hard", "adaptive"];
+const DIFFICULTIES: Difficulty[] = ["beginner", "easy", "medium", "hard", "expert", "master", "adaptive"];
+const TIME_OPTIONS = Object.keys(TIME_CONTROLS) as TimeControl[];
+const RATED_DIFFICULTIES: Exclude<Difficulty, "adaptive">[] = ["beginner", "easy", "medium", "hard", "expert", "master"];
+const SIDE_OPTIONS: { value: PlayerSide; label: string; detail: string }[] = [
+  { value: "white", label: "White", detail: "You make the first move" },
+  { value: "black", label: "Black", detail: "Practice responding" },
+  { value: "random", label: "Surprise me", detail: "RivalMind chooses" },
+];
 const COACH_LEVELS: { value: CoachLevel; label: string }[] = [
   { value: "off", label: "Off" },
   { value: "gentle", label: "Small hint" },
@@ -57,23 +69,44 @@ function gentleHint(result: SearchResult) {
 }
 
 function coachPositionGuidance(result: SearchResult) {
-  const score = result.candidates[0]?.score;
+  const best = result.candidates[0];
+  const score = best?.score;
   if (score === undefined) return "Stockfish is still forming its view of the position.";
-  if (score < -90_000) return "Stockfish sees a forced mate against you. The coach can explain the line, but no move guarantees recovery.";
+  if (best?.mate !== undefined && best.mate < 0) return `Stockfish sees a forced mate against you in ${Math.abs(best.mate)}. The coach can show the longest defense, but no move guarantees recovery.`;
+  if (best?.mate !== undefined && best.mate > 0) return `Stockfish has verified mate in ${best.mate}. Follow the shown line carefully—only the first move is guaranteed to keep that mate.`;
   if (score <= -300) return "Recovery mode: you are clearly worse, so the coach is finding the move that preserves the best practical chances.";
   if (score <= -100) return "You are under pressure, but the game is still playable. The top move limits further damage.";
   if (score >= 300) return "You have a winning advantage. The priority now is converting it without giving counterplay.";
   return "The game is still competitive. This move gives Stockfish’s best balance of safety and activity.";
 }
 
-function evaluationLabel(score: number | undefined) {
+function evaluationLabel(score: number | undefined, mate?: number) {
   if (score === undefined) return "—";
-  if (Math.abs(score) > 90_000) return score > 0 ? "Winning mate" : "Mate threat";
+  if (mate !== undefined) return mate > 0 ? `Mate in ${Math.abs(mate)}` : `Mate against you in ${Math.abs(mate)}`;
+  if (Math.abs(score) > 90_000) return score > 0 ? "Forced mate found" : "Forced mate against you";
   const pawns = score / 100;
   return `${pawns >= 0 ? "+" : ""}${pawns.toFixed(2)}`;
 }
 
-export default function RivalMindGame({ timeControl = "open" }: { timeControl?: TimeControl }) {
+function decisionLabel(source: MoveDecision["source"]) {
+  if (source === "independent") return "Your own move";
+  if (source === "coach-followed") return "Used a coach move";
+  if (source === "coach-diverged") return "Asked, then chose differently";
+  return "Used a gentle hint";
+}
+
+function decisionEffect(delta?: number) {
+  if (delta === undefined) return "Analysis still completing";
+  if (delta >= -20) return "Kept your position steady";
+  return `Cost about ${Math.abs(delta / 100).toFixed(2)} pawns`;
+}
+
+function nextTournamentDifficulty(difficulty: Difficulty) {
+  if (difficulty === "adaptive") return difficulty;
+  return RATED_DIFFICULTIES[Math.min(RATED_DIFFICULTIES.length - 1, RATED_DIFFICULTIES.indexOf(difficulty) + 1)];
+}
+
+export default function RivalMindGame({ timeControl: initialTimeControl = "open" }: { timeControl?: TimeControl }) {
   const gameRef = useRef(new Chess());
   const opponentRef = useRef<RivalEngine | null>(null);
   const coachRef = useRef<RivalCoach | null>(null);
@@ -81,14 +114,26 @@ export default function RivalMindGame({ timeControl = "open" }: { timeControl?: 
   const lastAssistantScoreRef = useRef<number | undefined>(undefined);
   const gameVersionRef = useRef(0);
   const gameFinishedRef = useRef(false);
-  const gameStartedAtRef = useRef(Date.now());
-  const playerTurnStartedAtRef = useRef(Date.now());
+  const gameStartedAtRef = useRef(0);
+  const playerTurnStartedAtRef = useRef(0);
   const playerThinkMsRef = useRef(0);
   const rivalThinkMsRef = useRef(0);
   const coachTimeMsRef = useRef(0);
   const sessionStartedRef = useRef(false);
+  const assistantTimelineRef = useRef<AssistantSnapshot[]>([]);
+  const decisionsRef = useRef<MoveDecision[]>([]);
+  const consultationRef = useRef<{ ply: number; coachLevel: CoachLevel; shownMoves: string[]; shownSans: string[] } | null>(null);
   const [fen, setFen] = useState(() => new Chess().fen());
+  const [timeControl, setTimeControl] = useState<TimeControl>(initialTimeControl);
   const [difficulty, setDifficulty] = useState<Difficulty>("medium");
+  const [sideChoice, setSideChoice] = useState<PlayerSide>("white");
+  const [playerColor, setPlayerColor] = useState<PlayerColor>("w");
+  const [gameActive, setGameActive] = useState(false);
+  const [gameFinished, setGameFinished] = useState(false);
+  const [setupOpen, setSetupOpen] = useState(true);
+  const [sessionMode, setSessionMode] = useState<"single" | "cup">("single");
+  const [cupRound, setCupRound] = useState(1);
+  const [cupScore, setCupScore] = useState(0);
   const [coachLevel, setCoachLevel] = useState<CoachLevel>("gentle");
   const [profile, setProfile] = useState<PlayerProfile>(DEFAULT_PROFILE);
   const [profileReady, setProfileReady] = useState(false);
@@ -109,8 +154,11 @@ export default function RivalMindGame({ timeControl = "open" }: { timeControl?: 
   const [selectedSquare, setSelectedSquare] = useState<string | null>(null);
   const [message, setMessage] = useState("Your move. You are playing White.");
   const [summary, setSummary] = useState<PostGameSummary | null>(null);
+  const [decisions, setDecisions] = useState<MoveDecision[]>([]);
+  const [promotionChoice, setPromotionChoice] = useState<{ from: string; to: string } | null>(null);
   const [hintsThisGame, setHintsThisGame] = useState(0);
   const [sessionElapsedMs, setSessionElapsedMs] = useState(0);
+  const [coachElapsedMs, setCoachElapsedMs] = useState(0);
 
   useEffect(() => {
     opponentRef.current = new RivalEngine((status, name) => {
@@ -126,6 +174,7 @@ export default function RivalMindGame({ timeControl = "open" }: { timeControl?: 
       lastAssistantScoreRef.current = snapshot.whiteScore;
       setLatestAssistant(snapshot);
       setAssistantTimeline([snapshot]);
+      assistantTimelineRef.current = [snapshot];
     }).catch(() => undefined);
     let savedProfile: PlayerProfile | null = null;
     try {
@@ -137,10 +186,11 @@ export default function RivalMindGame({ timeControl = "open" }: { timeControl?: 
     const profileToRestore = savedProfile;
     queueMicrotask(() => {
       if (profileToRestore) setProfile(profileToRestore);
+      else setProfile({ ...DEFAULT_PROFILE, avatarSeed: uniqueAvatarSeed() });
       setProfileReady(true);
     });
     void loadCloudProfile().then((cloudProfile) => {
-      if (cloudProfile) setProfile((current) => cloudProfile.games > current.games ? cloudProfile : current);
+      if (cloudProfile) setProfile((current) => cloudProfile.games >= current.games ? cloudProfile : { ...current, displayName: cloudProfile.displayName, avatarSeed: cloudProfile.avatarSeed });
     });
     return () => {
       opponentRef.current?.dispose();
@@ -155,26 +205,63 @@ export default function RivalMindGame({ timeControl = "open" }: { timeControl?: 
   }, [profile, profileReady]);
 
   useEffect(() => {
-    if (summary) return;
-    const interval = window.setInterval(() => setSessionElapsedMs(Date.now() - gameStartedAtRef.current), 1000);
+    if (summary || !gameActive) return;
+    const interval = window.setInterval(() => setSessionElapsedMs(currentTimeMs() - gameStartedAtRef.current), 1000);
     return () => window.clearInterval(interval);
-  }, [summary]);
+  }, [gameActive, summary]);
+
+  function finishGame(forcedResult?: GameResult) {
+    if (gameFinishedRef.current) return;
+    gameFinishedRef.current = true;
+    setGameFinished(true);
+    const game = gameRef.current;
+    if (forcedResult && game.turn() === playerColor) playerThinkMsRef.current += currentTimeMs() - playerTurnStartedAtRef.current;
+    const result: GameResult = forcedResult ?? (game.isCheckmate() ? (game.turn() === playerColor ? "loss" : "win") : "draw");
+    const gameDecisions = decisionsRef.current;
+    const timeline = assistantTimelineRef.current;
+    const reviewedDecisions = gameDecisions.map((decision) => {
+      const snapshot = timeline.find((item) => item.ply === decision.ply);
+      return { ...decision, delta: snapshot?.delta, severity: snapshot?.severity };
+    });
+    const learning = learningScore(timeline, gameDecisions);
+    const baseTelemetry = {
+      timeControl,
+      totalTimeMs: currentTimeMs() - gameStartedAtRef.current,
+      playerThinkMs: playerThinkMsRef.current,
+      rivalThinkMs: rivalThinkMsRef.current,
+      coachUses: hintsThisGame,
+      coachTimeMs: coachTimeMsRef.current,
+      ...learning,
+      adaptiveBefore: profile.adaptiveLevel,
+    };
+    const advanced = advanceProfile(profile, result, baseTelemetry);
+    const telemetry: GameTelemetry = { ...baseTelemetry, adaptiveAfter: advanced.profile.adaptiveLevel, trainingPointsEarned: advanced.points };
+    const gameSummary = createPostGameSummary({ game, result, endedOnTime: Boolean(forcedResult), telemetry, timeline, decisions: reviewedDecisions, playerColor, newMilestones: advanced.newMilestones });
+    setProfile(advanced.profile);
+    if (sessionMode === "cup") setCupScore((score) => score + (result === "win" ? 3 : result === "draw" ? 1 : 0));
+    setSummary(gameSummary);
+    setMessage(forcedResult ? `${resultLabel(result)} on time` : resultLabel(result));
+    void syncCompletedGame({ game, difficulty, profile: advanced.profile, summary: gameSummary, timeline, assistantEnabled, playerColor }).catch(() => setMessage(`${resultLabel(result)} · Saved on this device; cloud sync will retry later.`));
+  }
 
   const renderGame = useMemo(() => new Chess(fen), [fen]);
-  const gameOver = renderGame.isGameOver() || gameFinishedRef.current;
-  const playerTurn = renderGame.turn() === "w";
-  const clock = useGameClock(timeControl, renderGame.turn(), rivalEngineStatus === "ready" && profileReady && !gameOver, (color) => finishGame(color === "w" ? "loss" : "win"));
+  const gameOver = renderGame.isGameOver() || gameFinished;
+  const playerTurn = renderGame.turn() === playerColor;
+  const clock = useGameClock(timeControl, renderGame.turn(), gameActive && rivalEngineStatus === "ready" && profileReady && !gameOver, (color) => finishGame(color === playerColor ? "loss" : "win"));
   const resetClock = clock.reset;
+  const rivalColor: Color = playerColor === "w" ? "b" : "w";
+  const playerClock = playerColor === "w" ? clock.whiteMs : clock.blackMs;
+  const rivalClock = rivalColor === "w" ? clock.whiteMs : clock.blackMs;
   const statusTone = thinking || coachThinking ? styles.thinkingDot : gameOver ? styles.doneDot : styles.readyDot;
 
   useEffect(() => {
-    if (sessionStartedRef.current || rivalEngineStatus !== "ready" || !profileReady) return;
+    if (!gameActive || sessionStartedRef.current || rivalEngineStatus !== "ready" || !profileReady) return;
     sessionStartedRef.current = true;
-    const now = Date.now();
+    const now = currentTimeMs();
     gameStartedAtRef.current = now;
     playerTurnStartedAtRef.current = now;
     resetClock();
-  }, [profileReady, resetClock, rivalEngineStatus]);
+  }, [gameActive, profileReady, resetClock, rivalEngineStatus]);
 
   const legalTargets = useMemo(() => {
     if (!selectedSquare) return [];
@@ -210,69 +297,46 @@ export default function RivalMindGame({ timeControl = "open" }: { timeControl?: 
     return result;
   }, [lastMove, legalTargets, selectedSquare]);
 
-  function finishGame(forcedResult?: GameResult) {
-    if (gameFinishedRef.current) return;
-    gameFinishedRef.current = true;
-    const game = gameRef.current;
-    if (forcedResult && game.turn() === "w") playerThinkMsRef.current += Date.now() - playerTurnStartedAtRef.current;
-    const result: GameResult = forcedResult ?? (game.isCheckmate() ? (game.turn() === "b" ? "win" : "loss") : "draw");
-    const learning = learningScore(assistantTimeline);
-    const baseTelemetry = {
-      timeControl,
-      totalTimeMs: Date.now() - gameStartedAtRef.current,
-      playerThinkMs: playerThinkMsRef.current,
-      rivalThinkMs: rivalThinkMsRef.current,
-      coachUses: hintsThisGame,
-      coachTimeMs: coachTimeMsRef.current,
-      ...learning,
-      adaptiveBefore: profile.adaptiveLevel,
-    };
-    const advanced = advanceProfile(profile, result, baseTelemetry);
-    const telemetry: GameTelemetry = { ...baseTelemetry, adaptiveAfter: advanced.profile.adaptiveLevel, trainingPointsEarned: advanced.points };
-    const gameSummary = createPostGameSummary({ game, result, endedOnTime: Boolean(forcedResult), telemetry, timeline: assistantTimeline, newMilestones: advanced.newMilestones });
-    setProfile(advanced.profile);
-    setSummary(gameSummary);
-    setMessage(forcedResult ? `${resultLabel(result)} on time` : resultLabel(result));
-    void syncCompletedGame({ game, difficulty, profile: advanced.profile, summary: gameSummary, timeline: assistantTimeline, assistantEnabled }).catch(() => setMessage(`${resultLabel(result)} · Saved on this device; cloud sync will retry later.`));
-  }
-
-  async function updateAssistant(position: string, actor: AssistantSnapshot["actor"], move: string | undefined, ply: number, force = false) {
+  async function updateAssistant(position: string, actor: AssistantSnapshot["actor"], move: string | undefined, ply: number, force = false, analysisPlayerColor = playerColor) {
     if (!assistantEnabled && !force) return;
     const version = gameVersionRef.current;
     setAssistantThinking(true);
     try {
       const result = await assistantRef.current?.analyze(position);
       if (!result || version !== gameVersionRef.current) return;
-      const snapshot = buildSnapshot({ ply, fen: position, actor, move, result, previousWhiteScore: lastAssistantScoreRef.current });
+      const snapshot = buildSnapshot({ ply, fen: position, actor, move, result, previousWhiteScore: lastAssistantScoreRef.current, playerColor: analysisPlayerColor });
       lastAssistantScoreRef.current = snapshot.whiteScore;
       setLatestAssistant(snapshot);
-      setAssistantTimeline((items) => [...items.filter((item) => item.ply !== ply), snapshot].sort((a, b) => a.ply - b.ply));
+      const nextTimeline = [...assistantTimelineRef.current.filter((item) => item.ply !== ply), snapshot].sort((a, b) => a.ply - b.ply);
+      assistantTimelineRef.current = nextTimeline;
+      setAssistantTimeline(nextTimeline);
     } finally {
       if (version === gameVersionRef.current) setAssistantThinking(false);
     }
   }
 
-  async function requestRivalMove(position: string) {
+  async function requestRivalMove(position: string, activePlayerColor = playerColor, activeDifficulty = difficulty) {
     const version = gameVersionRef.current;
-    const rivalStartedAt = Date.now();
+    const rivalStartedAt = currentTimeMs();
     setThinking(true);
     setMessage("Rival is choosing a move…");
     try {
       const engine = opponentRef.current;
       if (!engine) throw new Error("Engine is still starting");
-      const result = await engine.chooseMove(position, difficulty, profile);
+      const result = await engine.chooseMove(position, activeDifficulty, profile);
       if (version !== gameVersionRef.current || gameFinishedRef.current) return;
-      rivalThinkMsRef.current += Date.now() - rivalStartedAt;
+      rivalThinkMsRef.current += currentTimeMs() - rivalStartedAt;
+      const rivalColor = activePlayerColor === "w" ? "b" : "w";
       gameRef.current.move({ from: result.move.from, to: result.move.to, promotion: result.move.promotion ?? "q" });
-      clock.addIncrement("b");
+      clock.addIncrement(rivalColor);
       const rivalSan = gameRef.current.history().at(-1);
       setFen(gameRef.current.fen());
       setMoveHistory(gameRef.current.history());
       setLastMove({ from: result.move.from, to: result.move.to });
       setLastSearch({ actor: "Rival", nodes: result.nodes, depth: result.depth, timeMs: result.timeMs, engine: result.engine });
       setMessage(gameRef.current.isCheck() ? "Your king is in check." : "Your move.");
-      playerTurnStartedAtRef.current = Date.now();
-      void updateAssistant(gameRef.current.fen(), "Rival", rivalSan, gameRef.current.history().length);
+      playerTurnStartedAtRef.current = currentTimeMs();
+      void updateAssistant(gameRef.current.fen(), "Rival", rivalSan, gameRef.current.history().length, false, activePlayerColor);
       if (gameRef.current.isGameOver()) finishGame();
     } catch {
       if (version === gameVersionRef.current) setMessage("Stockfish could not finish that search. Reload the page to restart the engine.");
@@ -281,18 +345,42 @@ export default function RivalMindGame({ timeControl = "open" }: { timeControl?: 
     }
   }
 
-  function makePlayerMove(from: string, to: string) {
-    if (thinking || coachThinking || gameRef.current.turn() !== "w" || gameRef.current.isGameOver()) return false;
+  function makePlayerMove(from: string, to: string, promotion?: "q" | "r" | "b" | "n") {
+    if (thinking || coachThinking || gameRef.current.turn() !== playerColor || gameRef.current.isGameOver()) return false;
+    const piece = gameRef.current.get(from as Square);
+    const promotionRank = playerColor === "w" ? "8" : "1";
+    if (piece?.type === "p" && to.endsWith(promotionRank) && !promotion) {
+      setPromotionChoice({ from, to });
+      setMessage("Choose the piece for your pawn promotion.");
+      return false;
+    }
     try {
-      const move = gameRef.current.move({ from, to, promotion: "q" });
+      const move = gameRef.current.move({ from, to, promotion });
       if (!move) return false;
-      playerThinkMsRef.current += Date.now() - playerTurnStartedAtRef.current;
-      clock.addIncrement("w");
+      playerThinkMsRef.current += currentTimeMs() - playerTurnStartedAtRef.current;
+      clock.addIncrement(playerColor);
+      const consultation = consultationRef.current?.ply === gameRef.current.history().length ? consultationRef.current : null;
+      const uci = `${from}${to}${move.promotion ?? ""}`;
+      const source = !consultation ? "independent"
+        : consultation.coachLevel === "gentle" ? "coach-guided"
+          : consultation.shownMoves.includes(uci) ? "coach-followed" : "coach-diverged";
+      const decision: MoveDecision = {
+        ply: gameRef.current.history().length,
+        move: move.san,
+        uci,
+        source,
+        coachLevel: consultation?.coachLevel,
+        suggestedMoves: consultation?.shownSans ?? [],
+      };
+      decisionsRef.current = [...decisionsRef.current, decision];
+      setDecisions(decisionsRef.current);
+      consultationRef.current = null;
       const nextFen = gameRef.current.fen();
       setFen(nextFen);
       setMoveHistory(gameRef.current.history());
       setLastMove({ from, to });
       setSelectedSquare(null);
+      setPromotionChoice(null);
       setCoachResult(null);
       void updateAssistant(nextFen, "You", move.san, gameRef.current.history().length);
       if (gameRef.current.isGameOver()) finishGame();
@@ -307,17 +395,17 @@ export default function RivalMindGame({ timeControl = "open" }: { timeControl?: 
   function handleSquareClick(square: string) {
     if (selectedSquare === square) {
       setSelectedSquare(null);
-      setMessage("Selection cleared. Choose a white piece.");
+      setMessage(`Selection cleared. Choose one of your ${playerColor === "w" ? "White" : "Black"} pieces.`);
       return;
     }
     if (selectedSquare && makePlayerMove(selectedSquare, square)) return;
     const piece = gameRef.current.get(square as Square);
-    if (piece?.color === "w") {
+    if (piece?.color === playerColor) {
       setSelectedSquare(square);
       setMessage(`Selected ${square}. Choose a highlighted square.`);
     } else {
       setSelectedSquare(null);
-      setMessage("Choose one of your white pieces first.");
+      setMessage(`Choose one of your ${playerColor === "w" ? "White" : "Black"} pieces first.`);
     }
   }
 
@@ -329,9 +417,17 @@ export default function RivalMindGame({ timeControl = "open" }: { timeControl?: 
       const result = await coachRef.current?.analyze(gameRef.current.fen());
       if (!result) return;
       setCoachResult(result);
+      const visibleCandidates = coachLevel === "gentle" ? [] : result.candidates.slice(0, coachLevel === "best" ? 1 : 3);
+      consultationRef.current = {
+        ply: gameRef.current.history().length + 1,
+        coachLevel,
+        shownMoves: visibleCandidates.map((move) => move.uci),
+        shownSans: visibleCandidates.map((move) => move.san),
+      };
       setLastSearch({ actor: "Coach", nodes: result.nodes, depth: result.depth, timeMs: result.timeMs, engine: result.engine });
       setHintsThisGame((count) => count + 1);
       coachTimeMsRef.current += result.timeMs;
+      setCoachElapsedMs(coachTimeMsRef.current);
       setProfile((current) => ({ ...current, hintUsage: current.hintUsage + 1 }));
     } catch {
       setMessage("The Stockfish coach is unavailable. Reload the page to restart it.");
@@ -340,9 +436,10 @@ export default function RivalMindGame({ timeControl = "open" }: { timeControl?: 
     }
   }
 
-  function newGame() {
+  function resetGameState(activePlayerColor: PlayerColor) {
     gameVersionRef.current += 1;
     gameFinishedRef.current = false;
+    setGameFinished(false);
     gameRef.current = new Chess();
     setFen(gameRef.current.fen());
     setThinking(false);
@@ -354,19 +451,54 @@ export default function RivalMindGame({ timeControl = "open" }: { timeControl?: 
     setSelectedSquare(null);
     setHintsThisGame(0);
     setSummary(null);
+    decisionsRef.current = [];
+    setDecisions([]);
+    consultationRef.current = null;
+    setPromotionChoice(null);
     setSessionElapsedMs(0);
-    gameStartedAtRef.current = Date.now();
-    playerTurnStartedAtRef.current = Date.now();
+    gameStartedAtRef.current = currentTimeMs();
+    playerTurnStartedAtRef.current = currentTimeMs();
     playerThinkMsRef.current = 0;
     rivalThinkMsRef.current = 0;
     coachTimeMsRef.current = 0;
-    sessionStartedRef.current = true;
+    setCoachElapsedMs(0);
+    sessionStartedRef.current = false;
     clock.reset();
     lastAssistantScoreRef.current = undefined;
     setLatestAssistant(null);
     setAssistantTimeline([]);
-    setMessage("Your move. You are playing White.");
-    if (assistantEnabled) void updateAssistant(gameRef.current.fen(), "Start", undefined, 0);
+    assistantTimelineRef.current = [];
+    setMessage(activePlayerColor === "w" ? "Your move. You are playing White." : "Rival opens. You are playing Black.");
+  }
+
+  function beginConfiguredGame(activeDifficulty = difficulty) {
+    const activePlayerColor: PlayerColor = sideChoice === "random" ? randomPlayerColor() : sideChoice === "white" ? "w" : "b";
+    setPlayerColor(activePlayerColor);
+    resetGameState(activePlayerColor);
+    setSetupOpen(false);
+    setGameActive(true);
+    if (assistantEnabled) void updateAssistant(gameRef.current.fen(), "Start", undefined, 0, false, activePlayerColor);
+    if (activePlayerColor === "b") {
+      window.setTimeout(() => void requestRivalMove(gameRef.current.fen(), activePlayerColor, activeDifficulty), 0);
+    }
+  }
+
+  function startConfiguredGame() {
+    if (sessionMode === "cup") { setCupRound(1); setCupScore(0); }
+    beginConfiguredGame();
+  }
+
+  function continueTournament() {
+    const nextDifficulty = nextTournamentDifficulty(difficulty);
+    setCupRound((round) => Math.min(3, round + 1));
+    setDifficulty(nextDifficulty);
+    beginConfiguredGame(nextDifficulty);
+  }
+
+  function openGameSetup() {
+    setSummary(null);
+    setGameActive(false);
+    setSetupOpen(true);
   }
 
   return (
@@ -376,7 +508,7 @@ export default function RivalMindGame({ timeControl = "open" }: { timeControl?: 
           <span className={styles.mark} aria-hidden="true"><i /><i /><i /></span>
           RivalMind
         </Link>
-        <p>{TIME_CONTROLS[timeControl].label} · Training board</p>
+        <p>{gameActive ? `${TIME_CONTROLS[timeControl].label} · You play ${playerColor === "w" ? "White" : "Black"}` : "Choose your training session"}</p>
         <div className={styles.headerStats} aria-label="Player record">
           <span><b>{profile.games}</b> games</span>
           <span><b>{profile.wins}</b> wins</span>
@@ -390,7 +522,7 @@ export default function RivalMindGame({ timeControl = "open" }: { timeControl?: 
           <div className={styles.panel}>
             <span className={styles.eyebrow}>Opponent</span>
             <div className={styles.opponentRow}>
-              <span className={styles.avatar}>RM</span>
+              <span className={styles.naviiAvatar}><Navii seed="rivalmind-stockfish" size={40} title="Rival" mood="serious" background="ring" /></span>
               <div><h2>Rival</h2><p>Powered by Stockfish</p></div>
               <span className={rivalEngineStatus === "ready" ? styles.onlineDot : rivalEngineStatus === "error" ? styles.engineErrorDot : styles.thinkingDot} aria-label={`Engine ${rivalEngineStatus}`} />
             </div>
@@ -399,7 +531,7 @@ export default function RivalMindGame({ timeControl = "open" }: { timeControl?: 
               <span><b>{engineName}</b><small>{rivalEngineStatus === "ready" ? "Engine online · every reply verified" : rivalEngineStatus === "error" ? "Engine unavailable · reload to retry" : "Loading the chess engine…"}</small></span>
             </div>
             <label className={styles.fieldLabel} htmlFor="difficulty">Difficulty</label>
-            <select id="difficulty" value={difficulty} onChange={(event) => setDifficulty(event.target.value as Difficulty)}>
+            <select id="difficulty" value={difficulty} disabled={gameActive} onChange={(event) => setDifficulty(event.target.value as Difficulty)}>
               {DIFFICULTIES.map((level) => <option key={level} value={level}>{level[0].toUpperCase() + level.slice(1)}{level === "adaptive" ? "" : ` · ${DIFFICULTY_PRESETS[level].elo}`}</option>)}
             </select>
             <p className={styles.supportingCopy}>
@@ -426,7 +558,7 @@ export default function RivalMindGame({ timeControl = "open" }: { timeControl?: 
           <div className={styles.mobileGameControls} aria-label="Quick game controls">
             <label htmlFor="mobile-difficulty">
               <span>Rival strength</span>
-              <select id="mobile-difficulty" value={difficulty} onChange={(event) => setDifficulty(event.target.value as Difficulty)}>
+              <select id="mobile-difficulty" value={difficulty} disabled={gameActive} onChange={(event) => setDifficulty(event.target.value as Difficulty)}>
                 {DIFFICULTIES.map((level) => <option key={level} value={level}>{level[0].toUpperCase() + level.slice(1)}</option>)}
               </select>
             </label>
@@ -435,27 +567,27 @@ export default function RivalMindGame({ timeControl = "open" }: { timeControl?: 
             </button>
           </div>
           <div className={styles.playerStrip}>
-            <div><span className={styles.miniAvatar}>SF</span><span><b>Rival</b><small>Stockfish · {difficulty}</small></span></div>
+            <div><span className={styles.miniAvatar}>SF</span><span><b>Rival</b><small>{rivalColor === "w" ? "White" : "Black"} · Stockfish {difficulty}</small></span></div>
             <div className={styles.stripActions}>
-              <span className={`${styles.clock} ${!playerTurn && !gameOver ? styles.activeClock : ""}`}>{formatClock(clock.blackMs)}</span>
-              <button className={styles.inlineNewGame} type="button" onClick={newGame} aria-label="Start a new game" title="Start a new game">↻</button>
+              <span className={`${styles.clock} ${!playerTurn && !gameOver ? styles.activeClock : ""}`}>{formatClock(rivalClock)}</span>
+              <button className={styles.inlineNewGame} type="button" onClick={openGameSetup} aria-label="Set up a new game" title="Set up a new game">↻</button>
             </div>
           </div>
           <div className={styles.boardFrame}>
             {moveHistory.length === 0 && !thinking && (
               <div className={styles.startGuide} aria-hidden="true">
-                <b>You are White</b>
+                <b>You are {playerColor === "w" ? "White" : "Black"}</b>
                 <span>Drag a piece, or tap it then tap a highlighted square.</span>
               </div>
             )}
             <Chessboard options={{
               id: "rivalmind-board",
               position: fen,
-              boardOrientation: "white",
+              boardOrientation: playerColor === "w" ? "white" : "black",
               showNotation: true,
               animationDurationInMs: 180,
               allowDragging: !thinking && !coachThinking && playerTurn && !gameOver,
-              canDragPiece: ({ square }) => Boolean(square && renderGame.get(square as Square)?.color === "w"),
+              canDragPiece: ({ square }) => Boolean(square && renderGame.get(square as Square)?.color === playerColor),
               onPieceDrop: ({ sourceSquare, targetSquare }) => Boolean(targetSquare && makePlayerMove(sourceSquare, targetSquare)),
               onSquareClick: ({ square }) => handleSquareClick(square),
               arrows,
@@ -468,8 +600,8 @@ export default function RivalMindGame({ timeControl = "open" }: { timeControl?: 
             }} />
           </div>
           <div className={styles.playerStrip}>
-            <div><span className={`${styles.miniAvatar} ${styles.youAvatar}`}>Y</span><span><b>You</b><small>White</small></span></div>
-            <span className={`${styles.clock} ${playerTurn && !gameOver ? styles.activeClock : ""}`}>{formatClock(clock.whiteMs)}</span>
+            <div><span className={styles.naviiMini}><Navii seed={profile.avatarSeed} size={29} title={profile.displayName} background="ring" /></span><span><b>{profile.displayName}</b><small>{playerColor === "w" ? "White" : "Black"}</small></span></div>
+            <span className={`${styles.clock} ${playerTurn && !gameOver ? styles.activeClock : ""}`}>{formatClock(playerClock)}</span>
           </div>
           <div className={styles.thinkingLine} aria-live="polite">
             <span className={statusTone} />
@@ -510,14 +642,15 @@ export default function RivalMindGame({ timeControl = "open" }: { timeControl?: 
                     ))}
                   </div>
                   <p><b>{coachResult.candidates[0]?.san}</b> — {coachResult.candidates[0] && explainMove(coachResult.candidates[0])}</p>
-                  <div className={styles.coachTelemetry}><span>Evaluation <b>{evaluationLabel(coachResult.candidates[0]?.score)}</b></span><span>Depth <b>{coachResult.depth}</b></span></div>
+                  <div className={styles.coachTelemetry}><span>Your outlook <b>{evaluationLabel(coachResult.candidates[0]?.score, coachResult.candidates[0]?.mate)}</b></span><span>Search depth <b>{coachResult.depth} half-moves</b></span></div>
+                  <details className={styles.coachExplainer}><summary>What do these numbers mean?</summary><p><b>+1.00</b> is roughly a one-pawn advantage for you. <b>Depth 16</b> means the engine completed a main search about 16 half-moves ahead, while also checking many deeper tactical branches. A mate count is shown only when Stockfish returns a forced mate line.</p></details>
                 </div>
               )}
             </div>
             <button type="button" className={styles.coachButton} disabled={coachLevel === "off" || coachEngineStatus !== "ready" || thinking || coachThinking || !playerTurn || gameOver} onClick={() => void askCoach()}>
               {coachEngineStatus === "loading" ? "Getting the coach ready…" : coachEngineStatus === "error" ? "Coach unavailable" : coachThinking ? "Looking for ideas…" : "Help me with this position"}<span>↗</span>
             </button>
-            <p className={styles.simCount}>{coachResult ? `${coachResult.nodes.toLocaleString()} positions checked · ${(coachTimeMsRef.current / 1000).toFixed(1)}s coach time this game` : `${hintsThisGame} coach uses this game · ${profile.hintUsage} all time`}</p>
+            <p className={styles.simCount}>{coachResult ? `${coachResult.nodes.toLocaleString()} positions checked · ${(coachElapsedMs / 1000).toFixed(1)}s coach time this game` : `${hintsThisGame} coach uses this game · ${profile.hintUsage} all time`}</p>
           </div>
 
           <div className={styles.profilePanel}>
@@ -526,7 +659,7 @@ export default function RivalMindGame({ timeControl = "open" }: { timeControl?: 
             <p>Adaptive level {profile.adaptiveLevel} · {adaptiveProgress(profile)}% recent-form progress</p>
             <small>{profile.games < 4 ? `${4 - profile.games} more games before strength can adjust` : `Current rival target: ${opponentStrengthLabel("adaptive", profile)}`}</small>
           </div>
-          <button type="button" className={styles.newGameButton} onClick={newGame}>New game <span>↻</span></button>
+          <button type="button" className={styles.newGameButton} onClick={openGameSetup}>Set up new game <span>↻</span></button>
         </aside>
       </section>
 
@@ -542,10 +675,37 @@ export default function RivalMindGame({ timeControl = "open" }: { timeControl?: 
           thinking={assistantThinking}
           latest={latestAssistant}
           timeline={assistantTimeline}
+          decisions={decisions}
+          playerColor={playerColor}
         />
       </div>
 
       <footer><span>RivalMind · Guest-first with secure cloud sync.</span><span><a href="https://github.com/lichess-org/stockfish.wasm" target="_blank" rel="noreferrer">Stockfish WASM</a> engine · legal moves by chess.js</span></footer>
+
+      {setupOpen && (
+        <div className={styles.modalBackdrop} role="presentation">
+          <section className={styles.setupCard} role="dialog" aria-modal="true" aria-labelledby="setup-title">
+            <div className={styles.setupHeading}><span className={styles.eyebrow}>New training game</span><h2 id="setup-title">Choose the lesson you want.</h2><p>Set the color, pace, and rival before the clock starts.</p></div>
+            <div className={styles.setupIdentity}><span className={styles.naviiAvatar}><Navii seed={profile.avatarSeed} size={40} title={profile.displayName} background="ring" /></span><label htmlFor="training-name"><b>Your training name</b><input id="training-name" maxLength={60} value={profile.displayName} onChange={(event) => setProfile((current) => ({ ...current, displayName: event.target.value }))} /></label><button type="button" onClick={() => setProfile((current) => ({ ...current, avatarSeed: uniqueAvatarSeed() }))}>New icon</button></div>
+            <fieldset className={styles.setupSection}><legend>Session</legend><div className={styles.sessionChoices}><button type="button" aria-pressed={sessionMode === "single"} onClick={() => setSessionMode("single")}><b>Single game</b><span>One focused lesson and review</span></button><button type="button" aria-pressed={sessionMode === "cup"} onClick={() => setSessionMode("cup")}><b>Training Cup</b><span>Three rounds · rival gets stronger</span></button></div></fieldset>
+            <fieldset className={styles.setupSection}><legend>Your side</legend><div className={styles.choiceGrid}>{SIDE_OPTIONS.map((option) => <button type="button" key={option.value} aria-pressed={sideChoice === option.value} onClick={() => setSideChoice(option.value)}><b>{option.label}</b><span>{option.detail}</span></button>)}</div></fieldset>
+            <fieldset className={styles.setupSection}><legend>Time</legend><div className={styles.timeGrid}>{TIME_OPTIONS.map((option) => <button type="button" key={option} aria-pressed={timeControl === option} onClick={() => setTimeControl(option)}><b>{TIME_CONTROLS[option].short}</b><span>{TIME_CONTROLS[option].label}</span></button>)}</div></fieldset>
+            <label className={styles.setupField} htmlFor="setup-difficulty"><span>Rival strength</span><select id="setup-difficulty" value={difficulty} onChange={(event) => setDifficulty(event.target.value as Difficulty)}>{DIFFICULTIES.map((level) => <option key={level} value={level}>{level === "adaptive" ? `Adaptive · current level ${profile.adaptiveLevel}` : `${level[0].toUpperCase() + level.slice(1)} · ${DIFFICULTY_PRESETS[level].elo} Elo`}</option>)}</select><small>{difficulty === "adaptive" ? "Uses your unassisted move quality and recent results to choose the next challenge." : DIFFICULTY_PRESETS[difficulty].description}</small></label>
+            <div className={styles.setupSummary}><span>Ready to train</span><b>{sessionMode === "cup" ? "3-round Training Cup · " : ""}{TIME_CONTROLS[timeControl].label} · {sideChoice === "random" ? "Random color" : sideChoice} · {difficulty}</b></div>
+            <button className={styles.startGameButton} type="button" disabled={rivalEngineStatus !== "ready" || !profileReady || !profile.displayName.trim()} onClick={startConfiguredGame}>{rivalEngineStatus === "ready" ? "Start game" : "Getting Stockfish ready…"}</button>
+          </section>
+        </div>
+      )}
+
+      {promotionChoice && (
+        <div className={styles.modalBackdrop} role="presentation">
+          <section className={styles.promotionCard} role="dialog" aria-modal="true" aria-labelledby="promotion-title">
+            <span className={styles.eyebrow}>Pawn promotion</span><h2 id="promotion-title">Choose your new piece.</h2><p>Queen is strongest most often, but a rook, bishop, or knight can be the precise choice.</p>
+            <div>{([['q','♛','Queen'],['r','♜','Rook'],['b','♝','Bishop'],['n','♞','Knight']] as const).map(([piece, icon, label]) => <button type="button" key={piece} onClick={() => makePlayerMove(promotionChoice.from, promotionChoice.to, piece)}><span>{icon}</span><b>{label}</b></button>)}</div>
+            <button className={styles.cancelPromotion} type="button" onClick={() => setPromotionChoice(null)}>Cancel</button>
+          </section>
+        </div>
+      )}
 
       {summary && (
         <div className={styles.modalBackdrop} role="presentation">
@@ -561,12 +721,18 @@ export default function RivalMindGame({ timeControl = "open" }: { timeControl?: 
               <span>Coach used<b>{summary.telemetry.coachUses}× · {formatDuration(summary.telemetry.coachTimeMs)}</b></span>
               <span>Move quality<b>{summary.telemetry.analyzedMoves ? `${summary.telemetry.accuracy}%` : "Not scored"}</b></span>
             </div>
+            <div className={styles.independenceReview}>
+              <div><span>Your real-strength signal</span><b>{summary.telemetry.independentMoves ? `${summary.telemetry.independentAccuracy}%` : "Not enough moves"}</b><p>Based only on {summary.telemetry.independentMoves} moves you chose without opening the coach.</p></div>
+              <div><span>Coach relationship</span><b>{summary.telemetry.coachFollowedMoves} followed · {summary.telemetry.coachDivergedMoves} declined</b><p>Gentle hints used: {summary.telemetry.coachGuidedMoves}. These moves stay visible, but do not inflate your independent score.</p></div>
+            </div>
+            {sessionMode === "cup" && <div className={styles.cupReview}><span>Training Cup · Round {cupRound} of 3</span><b>{cupScore} points</b><p>Win = 3 · draw = 1. Each round raises the rival one strength step.</p></div>}
+            {summary.decisions.length > 0 && <details className={styles.decisionReview} open><summary><b>Your decision trail</b><span>{summary.decisions.length} moves</span></summary><div>{summary.decisions.map((decision) => <article key={decision.ply} data-source={decision.source}><span>{Math.ceil(decision.ply / 2)}.</span><div><b>{decision.move}</b><small>{decisionLabel(decision.source)}{decision.suggestedMoves.length ? ` · Coach showed ${decision.suggestedMoves.join(", ")}` : ""}</small></div><em>{decisionEffect(decision.delta)}</em></article>)}</div></details>}
             <div className={styles.reviewLesson}><span>What went well</span><p>{summary.well}</p></div>
             <div className={styles.reviewLesson}><span>Key moment</span><p>{summary.keyMoment}</p></div>
             <div className={styles.reviewLesson}><span>Try next game</span><p>{summary.watch}</p></div>
             <div className={styles.adaptiveReview}><span>Adaptive rival</span><b>Level {summary.telemetry.adaptiveBefore} → {summary.telemetry.adaptiveAfter}</b><p>{summary.telemetry.adaptiveAfter > summary.telemetry.adaptiveBefore ? "Your recent form earned a stronger challenge." : summary.telemetry.adaptiveAfter < summary.telemetry.adaptiveBefore ? "The next game will give you more room to learn." : "One game never changes your level. RivalMind waits for a clear recent pattern."}</p></div>
             {summary.newMilestones.length > 0 && <div className={styles.milestoneEarned}><span>Milestone unlocked</span><b>{summary.newMilestones.join(" · ")}</b></div>}
-            <div className={styles.reviewActions}><button type="button" onClick={newGame}>Play again</button><Link href="/dashboard">See my training</Link></div>
+            <div className={styles.reviewActions}><button type="button" onClick={sessionMode === "cup" && cupRound < 3 ? continueTournament : startConfiguredGame}>{sessionMode === "cup" && cupRound < 3 ? `Play round ${cupRound + 1}` : sessionMode === "cup" ? "Restart cup" : "Play same setup"}</button><button type="button" className={styles.secondaryAction} onClick={openGameSetup}>Change setup</button><Link href="/dashboard">See my training</Link></div>
           </section>
         </div>
       )}

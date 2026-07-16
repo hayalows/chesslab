@@ -23,6 +23,7 @@ type AnalysisLine = {
   timeMs: number;
   pv: string[];
   wdl?: { win: number; draw: number; loss: number };
+  mate?: number;
 };
 
 type PendingSearch = {
@@ -40,16 +41,19 @@ type BridgeMessage =
 export type EngineStatusListener = (status: EngineStatus, name: string) => void;
 
 export const DIFFICULTY_PRESETS: Record<Exclude<Difficulty, "adaptive">, { elo: number; movetimeMs: number; description: string }> = {
-  easy: { elo: 1350, movetimeMs: 140, description: "More room to spot ideas and recover from mistakes." },
-  medium: { elo: 1600, movetimeMs: 300, description: "A steady challenge that punishes loose pieces." },
-  hard: { elo: 2100, movetimeMs: 700, description: "A precise opponent for experienced players." },
+  beginner: { elo: 1320, movetimeMs: 220, description: "A forgiving first rival that leaves room to recover." },
+  easy: { elo: 1450, movetimeMs: 380, description: "Clear plans, with enough mistakes to practice punishing them." },
+  medium: { elo: 1700, movetimeMs: 650, description: "A steady club-level challenge that notices loose pieces." },
+  hard: { elo: 2050, movetimeMs: 1000, description: "A precise rival that calculates tactics carefully." },
+  expert: { elo: 2400, movetimeMs: 1500, description: "Serious calculation with very few unforced mistakes." },
+  master: { elo: 2850, movetimeMs: 2200, description: "Full-strength preparation for your toughest training games." },
 };
 
 function adaptiveSettings(profile: PlayerProfile): StockfishSettings {
   const adjustedLevel = Math.max(1, Math.min(10, profile.adaptiveLevel));
   return {
     elo: 1350 + (adjustedLevel - 1) * 120,
-    movetimeMs: 120 + adjustedLevel * 55,
+    movetimeMs: 240 + adjustedLevel * 110,
     multiPv: 1,
   };
 }
@@ -77,7 +81,8 @@ function parseInfo(line: string): AnalysisLine | null {
   if (pvIndex < 0 || !tokens[pvIndex + 1] || scoreIndex < 0) return null;
   const scoreKind = tokens[scoreIndex + 1];
   const rawScore = Number(tokens[scoreIndex + 2]) || 0;
-  const score = scoreKind === "mate" ? Math.sign(rawScore || 1) * (100_000 - Math.abs(rawScore)) : rawScore;
+  const mate = scoreKind === "mate" ? rawScore : undefined;
+  const score = mate !== undefined ? Math.sign(mate || 1) * (100_000 - Math.abs(mate)) : rawScore;
   const wdlIndex = tokens.indexOf("wdl");
   return {
     depth: valueAfter(tokens, "depth"),
@@ -93,10 +98,11 @@ function parseInfo(line: string): AnalysisLine | null {
       draw: Number(tokens[wdlIndex + 2]) || 0,
       loss: Number(tokens[wdlIndex + 3]) || 0,
     } : undefined,
+    mate,
   };
 }
 
-function toSearchMove(fen: string, uci: string, score = 0, pv: string[] = [uci], wdl?: { win: number; draw: number; loss: number }): SearchMove {
+function toSearchMove(fen: string, uci: string, score = 0, pv: string[] = [uci], wdl?: { win: number; draw: number; loss: number }, mate?: number): SearchMove {
   const chess = new Chess(fen);
   const from = uci.slice(0, 2);
   const to = uci.slice(2, 4);
@@ -123,6 +129,7 @@ function toSearchMove(fen: string, uci: string, score = 0, pv: string[] = [uci],
     line: pv,
     lineSan,
     wdl,
+    mate,
   };
 }
 
@@ -222,8 +229,8 @@ class StockfishClient {
     try {
       const lines = [...pending.analyses.values()].sort((a, b) => a.multipv - b.multipv);
       const bestLine = lines.find((line) => line.move === bestUci) ?? lines[0];
-      const bestMove = toSearchMove(pending.fen, bestUci, bestLine?.score ?? 0, bestLine?.pv, bestLine?.wdl);
-      const candidates = lines.map((line) => toSearchMove(pending.fen, line.move, line.score, line.pv, line.wdl));
+      const bestMove = toSearchMove(pending.fen, bestUci, bestLine?.score ?? 0, bestLine?.pv, bestLine?.wdl, bestLine?.mate);
+      const candidates = lines.map((line) => toSearchMove(pending.fen, line.move, line.score, line.pv, line.wdl, line.mate));
       if (!candidates.some((move) => move.from === bestMove.from && move.to === bestMove.to)) candidates.unshift(bestMove);
       pending.resolve({
         bestMove,
@@ -303,7 +310,7 @@ export class RivalCoach implements CoachEngine {
   private client: StockfishClient;
   constructor(onStatus?: EngineStatusListener) { this.client = new StockfishClient(onStatus); }
   async analyze(fen: string) {
-    const result = await this.client.search(fen, { elo: null, movetimeMs: 1200, multiPv: 4 });
+    const result = await this.client.search(fen, { elo: null, movetimeMs: 1800, multiPv: 4 });
     return {
       candidates: result.candidates,
       depth: result.depth,

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { DEFAULT_PROFILE, type AssistantSnapshot, type GameTelemetry, type PlayerProfile, type SearchResult } from "../src/lib/game-types";
+import { DEFAULT_PROFILE, type AssistantSnapshot, type GameTelemetry, type MoveDecision, type PlayerProfile, type SearchResult } from "../src/lib/game-types";
 import { advanceProfile, formatClock, learningScore } from "../src/lib/training-analytics";
 
 function telemetry(profile: PlayerProfile, overrides: Partial<GameTelemetry> = {}) {
@@ -14,6 +14,11 @@ function telemetry(profile: PlayerProfile, overrides: Partial<GameTelemetry> = {
     accuracy: 80,
     bestMoveMatches: 3,
     analyzedMoves: 5,
+    independentMoves: 5,
+    independentAccuracy: 80,
+    coachFollowedMoves: 0,
+    coachDivergedMoves: 0,
+    coachGuidedMoves: 0,
     adaptiveBefore: profile.adaptiveLevel,
     ...overrides,
   };
@@ -50,6 +55,24 @@ test("learning score recognizes an exact Stockfish first choice", () => {
   assert.equal(score.bestMoveMatches, 1);
   assert.equal(score.analyzedMoves, 1);
   assert.ok(score.accuracy >= 90);
+});
+
+test("real-strength score excludes moves made after opening the coach", () => {
+  const result = { candidates: [{ san: "e4" }] } as SearchResult;
+  const timeline = [
+    { ply: 0, actor: "Start", result },
+    { ply: 1, actor: "You", move: "e4", delta: -10, severity: "steady", result },
+    { ply: 3, actor: "You", move: "Nf3", delta: -240, severity: "blunder", result },
+  ] as AssistantSnapshot[];
+  const decisions = [
+    { ply: 1, move: "e4", uci: "e2e4", source: "independent", suggestedMoves: [] },
+    { ply: 3, move: "Nf3", uci: "g1f3", source: "coach-diverged", suggestedMoves: ["Bc4"] },
+  ] as MoveDecision[];
+  const score = learningScore(timeline, decisions);
+  assert.equal(score.independentMoves, 1);
+  assert.ok(score.independentAccuracy >= 90);
+  assert.equal(score.coachDivergedMoves, 1);
+  assert.ok(score.accuracy < score.independentAccuracy);
 });
 
 test("clock wording is stable at boundaries", () => {

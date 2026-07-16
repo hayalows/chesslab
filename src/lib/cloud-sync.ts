@@ -1,6 +1,6 @@
 import type { Chess } from "chess.js";
 import { opponentSettings } from "./engine-adapter";
-import type { AssistantSnapshot, Difficulty, PlayerProfile, PostGameSummary } from "./game-types";
+import type { AssistantSnapshot, Difficulty, PlayerColor, PlayerProfile, PostGameSummary } from "./game-types";
 import { createClient } from "./supabase/client";
 import { trainingRating } from "./training-analytics";
 
@@ -9,9 +9,11 @@ export async function loadCloudProfile(): Promise<PlayerProfile | null> {
   if (!supabase) return null;
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return null;
-  const { data } = await supabase.from("profiles").select("total_games,wins,losses,draws,hint_usage,adaptive_level,training_points,training_minutes,current_streak,best_streak,last_level_change_game,milestones").maybeSingle();
+  const { data } = await supabase.from("profiles").select("display_name,avatar_seed,total_games,wins,losses,draws,hint_usage,adaptive_level,training_points,training_minutes,current_streak,best_streak,last_level_change_game,milestones,independent_moves,independent_accuracy,estimated_strength").maybeSingle();
   if (!data) return null;
   return {
+    displayName: data.display_name || "Chess learner",
+    avatarSeed: !data.avatar_seed || data.avatar_seed === "rivalmind-player" ? user.id : data.avatar_seed,
     games: data.total_games,
     wins: data.wins,
     losses: data.losses,
@@ -25,6 +27,9 @@ export async function loadCloudProfile(): Promise<PlayerProfile | null> {
     bestStreak: data.best_streak,
     lastLevelChangeGame: data.last_level_change_game,
     milestones: Array.isArray(data.milestones) ? data.milestones : [],
+    independentMoves: data.independent_moves ?? 0,
+    independentAccuracy: Number(data.independent_accuracy) || 0,
+    estimatedStrength: data.estimated_strength ?? 900,
   };
 }
 
@@ -35,7 +40,8 @@ export async function syncProfile(profile: PlayerProfile, assistantEnabled: bool
   if (!user) return { synced: false as const, reason: "guest" };
   const { error } = await supabase.from("profiles").upsert({
     user_id: user.id,
-    display_name: user.user_metadata?.full_name || user.email?.split("@")[0] || "Chess learner",
+    display_name: profile.displayName.trim() || user.user_metadata?.display_name || user.email?.split("@")[0] || "Chess learner",
+    avatar_seed: profile.avatarSeed || user.id,
     total_games: profile.games,
     wins: profile.wins,
     losses: profile.losses,
@@ -50,6 +56,9 @@ export async function syncProfile(profile: PlayerProfile, assistantEnabled: bool
     best_streak: profile.bestStreak,
     last_level_change_game: profile.lastLevelChangeGame,
     milestones: profile.milestones,
+    independent_moves: profile.independentMoves,
+    independent_accuracy: profile.independentAccuracy,
+    estimated_strength: profile.estimatedStrength,
     updated_at: new Date().toISOString(),
   }, { onConflict: "user_id" });
   if (error) throw error;
@@ -63,6 +72,7 @@ export async function syncCompletedGame(args: {
   summary: PostGameSummary;
   timeline: AssistantSnapshot[];
   assistantEnabled: boolean;
+  playerColor: PlayerColor;
 }) {
   const supabase = createClient();
   if (!supabase) return;
@@ -78,7 +88,8 @@ export async function syncCompletedGame(args: {
     opponent_elo: settings.elo,
     pgn: args.game.pgn(),
     final_fen: args.game.fen(),
-    summary: { outcomeTitle: args.summary.outcomeTitle, outcomeDetail: args.summary.outcomeDetail, scoreline: args.summary.scoreline, termination: args.summary.termination, headline: args.summary.headline, well: args.summary.well, watch: args.summary.watch, keyMoment: args.summary.keyMoment, newMilestones: args.summary.newMilestones },
+    summary: { outcomeTitle: args.summary.outcomeTitle, outcomeDetail: args.summary.outcomeDetail, scoreline: args.summary.scoreline, termination: args.summary.termination, headline: args.summary.headline, well: args.summary.well, watch: args.summary.watch, keyMoment: args.summary.keyMoment, decisions: args.summary.decisions, newMilestones: args.summary.newMilestones },
+    player_color: args.playerColor,
     time_control: args.summary.telemetry.timeControl,
     total_time_ms: args.summary.telemetry.totalTimeMs,
     player_think_ms: args.summary.telemetry.playerThinkMs,
@@ -111,6 +122,8 @@ export async function syncCompletedGame(args: {
       classification: snapshot?.severity,
       explanation: snapshot?.explanation,
       principal_variation: snapshot?.result.candidates[0]?.lineSan ?? [],
+      decision_source: args.summary.decisions.find((item) => item.ply === index + 1)?.source ?? null,
+      coach_suggestions: args.summary.decisions.find((item) => item.ply === index + 1)?.suggestedMoves ?? [],
     };
   });
   if (rows.length) {
@@ -129,7 +142,8 @@ export async function syncCompletedGame(args: {
     })), { onConflict: "user_id,code" });
     if (achievementError) throw achievementError;
   }
-  const playerMoves = verbose.filter((_, index) => index % 2 === 0);
+  const independentPly = new Set(args.summary.decisions.filter((item) => item.source === "independent").map((item) => item.ply));
+  const playerMoves = verbose.map((move, index) => ({ move, ply: index + 1 })).filter(({ ply }) => (ply - 1) % 2 === (args.playerColor === "b" ? 1 : 0) && independentPly.has(ply)).map(({ move }) => move);
   const forcingMoves = playerMoves.filter((move) => Boolean(move.captured) || move.san.includes("+")).length;
   const earlyCastle = playerMoves.slice(0, 10).some((move) => move.san === "O-O" || move.san === "O-O-O");
   const { data: currentStats } = await supabase.from("player_stats").select("style_metrics,average_accuracy,analyzed_games").maybeSingle();
@@ -139,11 +153,11 @@ export async function syncCompletedGame(args: {
     player_moves: (oldMetrics.player_moves ?? 0) + playerMoves.length,
     early_castles: (oldMetrics.early_castles ?? 0) + (earlyCastle ? 1 : 0),
   };
-  const analyzedGames = (currentStats?.analyzed_games ?? 0) + 1;
+  const analyzedGames = (currentStats?.analyzed_games ?? 0) + (playerMoves.length ? 1 : 0);
   const forcingRate = metrics.forcing_moves / Math.max(1, metrics.player_moves);
   const castleRate = metrics.early_castles / Math.max(1, analyzedGames);
   const styleLabel = analyzedGames < 20 ? null : forcingRate >= 0.32 ? "Tactical explorer" : castleRate >= 0.7 ? "Patient planner" : "Balanced builder";
-  const averageAccuracy = !args.summary.telemetry.analyzedMoves ? currentStats?.average_accuracy ?? null : currentStats?.average_accuracy == null ? args.summary.telemetry.accuracy : ((Number(currentStats.average_accuracy) * Math.max(0, analyzedGames - 1)) + args.summary.telemetry.accuracy) / analyzedGames;
+  const averageAccuracy = !args.summary.telemetry.independentMoves ? currentStats?.average_accuracy ?? null : currentStats?.average_accuracy == null ? args.summary.telemetry.independentAccuracy : ((Number(currentStats.average_accuracy) * Math.max(0, analyzedGames - 1)) + args.summary.telemetry.independentAccuracy) / analyzedGames;
   const { error: statsError } = await supabase.from("player_stats").upsert({ user_id: user.id, style_metrics: metrics, style_label: styleLabel, average_accuracy: averageAccuracy, analyzed_games: analyzedGames, last_calculated_at: new Date().toISOString(), updated_at: new Date().toISOString() }, { onConflict: "user_id" });
   if (statsError) throw statsError;
 }
