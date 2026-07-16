@@ -29,7 +29,7 @@ import {
   type PostGameSummary,
   type TimeControl,
 } from "@/lib/game-types";
-import { isPlayerTurn } from "@/lib/game-session";
+import { canRevealCoachStep, coachCacheMode, isPlayerTurn } from "@/lib/game-session";
 import GameAssistant from "./GameAssistant";
 import AuthMenu from "./AuthMenu";
 import { loadCloudProfile, syncCompletedGame } from "@/lib/cloud-sync";
@@ -439,7 +439,7 @@ export default function RivalMindGame({ timeControl: initialTimeControl = "open"
     const request = ++coachRequestRef.current;
     const position = gameRef.current.fen();
     const idea = playerIdea.trim() || undefined;
-    const cached = assistantRef.current?.peek(position);
+    const cached = assistantRef.current?.peek(position, coachCacheMode(coachLevel));
     const registerConsultation = (result: SearchResult) => {
       const visibleCandidates = coachLevel === "gentle" ? [] : result.candidates.slice(0, coachLevel === "best" ? 1 : 3);
       consultationRef.current = {
@@ -472,7 +472,7 @@ export default function RivalMindGame({ timeControl: initialTimeControl = "open"
   }
 
   function revealNextCoachStep() {
-    if (!coachResult || coachLevel !== "gentle") return;
+    if (!coachResult || coachLevel !== "gentle" || !canRevealCoachStep(coachRevealStep, coachThinking)) return;
     const next = Math.min(5, coachRevealStep + 1);
     setCoachRevealStep(next);
     if (next >= 4 && consultationRef.current) {
@@ -709,7 +709,7 @@ export default function RivalMindGame({ timeControl: initialTimeControl = "open"
                   {coachRevealStep === 3 && <p>Look closely at your <b>{coachPieceName}</b>. Stockfish’s leading line starts by improving or using that piece.</p>}
                   {coachRevealStep === 4 && <div className={styles.candidateList}>{coachResult.candidates.slice(0, 3).map((move,index)=><span key={move.uci}><i>{index + 1}</i>{move.san}</span>)}</div>}
                   {coachRevealStep === 5 && <><p><b>{coachBest?.san}</b> — {coachBest && explainMove(coachBest)}</p><div className={styles.coachTelemetry}><span>Your outlook <b>{evaluationLabel(coachBest?.score, coachBest?.mate)}</b></span><span>Search depth <b>{coachResult.depth} half-moves</b></span></div></>}
-                  {coachRevealStep < 5 && <button type="button" className={styles.revealButton} onClick={revealNextCoachStep}>{coachRevealStep === 4 ? "Reveal Stockfish’s choice" : "Show the next clue"}</button>}
+                  {coachRevealStep < 5 && <button type="button" className={styles.revealButton} disabled={!canRevealCoachStep(coachRevealStep, coachThinking)} onClick={revealNextCoachStep}>{coachThinking && coachRevealStep >= 3 ? "Finishing Stockfish search…" : coachRevealStep === 4 ? "Reveal Stockfish’s choice" : "Show the next clue"}</button>}
                 </div>
               ) : (
                 <div className={styles.coachAdvice}>

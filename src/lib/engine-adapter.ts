@@ -288,7 +288,7 @@ export interface OpponentEngine {
 
 export interface AssistantEngine {
   analyze(fen: string, mode?: "quick" | "deep"): Promise<SearchResult>;
-  peek(fen: string): SearchResult | null;
+  peek(fen: string, mode?: "quick" | "deep"): SearchResult | null;
   dispose(): void;
 }
 
@@ -306,9 +306,9 @@ export class RivalAssistant implements AssistantEngine {
   private client: StockfishClient;
   private cache = new Map<string, { quick?: SearchResult; deep?: SearchResult }>();
   constructor(onStatus?: EngineStatusListener) { this.client = new StockfishClient(onStatus); }
-  peek(fen: string) {
+  peek(fen: string, mode: "quick" | "deep" = "quick") {
     const entry = this.cache.get(fen);
-    const result = entry?.deep ?? entry?.quick;
+    const result = mode === "deep" ? entry?.deep : entry?.deep ?? entry?.quick;
     return result ? { ...result, cached: true } : null;
   }
   async analyze(fen: string, mode: "quick" | "deep" = "quick") {
