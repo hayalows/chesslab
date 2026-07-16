@@ -1,4 +1,6 @@
+import { useEffect, useState } from "react";
 import { confidence, explainCandidate, healthScore, outlook, phaseLabel, tacticalRadar } from "@/lib/assistant-insights";
+import { predictHumanPlans, type HumanPlanView } from "@/lib/human-plan-model";
 import type { AssistantSnapshot, EngineStatus, MoveDecision, PlayerColor } from "@/lib/game-types";
 import styles from "./RivalMindGame.module.css";
 
@@ -20,6 +22,7 @@ function evaluation(score: number, mate?: number) {
 }
 
 export default function GameAssistant({ enabled, onToggle, status, thinking, latest, timeline, decisions, playerColor }: Props) {
+  const [humanPlans, setHumanPlans] = useState<HumanPlanView | null>(null);
   const result = latest?.result ?? null;
   const main = result?.candidates[0];
   const view = result && latest ? outlook(result, latest.fen) : null;
@@ -30,6 +33,13 @@ export default function GameAssistant({ enabled, onToggle, status, thinking, lat
   const assisted = decisions.length - independent.length;
   const independentRate = decisions.length ? Math.round(independent.length / decisions.length * 100) : 100;
   const playerMate = main?.mate === undefined ? undefined : main.mate * (latest?.fen.split(" ")[1] === playerColor ? 1 : -1);
+
+  useEffect(() => {
+    if (!enabled || !latest?.fen) return;
+    let active = true;
+    void predictHumanPlans(latest.fen).then((plans) => { if (active) setHumanPlans(plans); }).catch(() => { if (active) setHumanPlans(null); });
+    return () => { active = false; };
+  }, [enabled, latest?.fen]);
 
   return (
     <section className={`${styles.panel} ${styles.assistantPanel}`} aria-label="RivalMind game assistant">
@@ -70,6 +80,12 @@ export default function GameAssistant({ enabled, onToggle, status, thinking, lat
                   const fromPlayerSide = latest.fen.split(" ")[1] === playerColor;
                   return <div key={move.uci}><span>{index + 1}</span><p><b>{move.san}</b>{explainCandidate(move, main?.score ?? move.score, index)}</p><em>{evaluation(fromPlayerSide ? move.score : -move.score, move.mate === undefined ? undefined : move.mate * (fromPlayerSide ? 1 : -1))}</em></div>;
                 })}</div>
+              </details>
+
+              <details className={styles.insightCard}>
+                <summary><span><b>What might a human try next?</b></span><em>{humanPlans?.opening ?? "Pattern model"}</em></summary>
+                {humanPlans?.plans.length ? <div className={styles.humanPlans}>{humanPlans.plans.map((plan,index)=><div key={plan.moves.join("-")}><span>{index + 1}</span><p><b>{plan.moves.join(" ")}</b><small>{Math.round(plan.probability * 100)}% within the model’s leading branches</small></p></div>)}</div> : <p>This position is outside the model’s reliable repeated patterns. Stockfish remains the guide.</p>}
+                <p className={styles.guardrail}>Learned from {humanPlans?.games.toLocaleString() ?? "20,058"} human games and your own choices · {humanPlans ? `${Math.round(humanPlans.top3Accuracy * 100)}% held-out top-3 accuracy` : "model loading"}. This predicts behavior, not the best chess move.</p>
               </details>
 
               <details className={styles.insightCard}>

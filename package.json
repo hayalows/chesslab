@@ -9,7 +9,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "tsx --test tests/**/*.test.ts"
+    "test": "tsx --test tests/**/*.test.ts",
+    "train:human-plan": "node scripts/train-human-plan-model.mjs"
   },
   "dependencies": {
     "@supabase/ssr": "0.12.3",

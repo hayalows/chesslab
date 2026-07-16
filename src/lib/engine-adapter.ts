@@ -286,13 +286,9 @@ export interface OpponentEngine {
   dispose(): void;
 }
 
-export interface CoachEngine {
-  analyze(fen: string): Promise<SearchResult>;
-  dispose(): void;
-}
-
 export interface AssistantEngine {
-  analyze(fen: string): Promise<SearchResult>;
+  analyze(fen: string, mode?: "quick" | "deep"): Promise<SearchResult>;
+  peek(fen: string): SearchResult | null;
   dispose(): void;
 }
 
@@ -306,30 +302,22 @@ export class RivalEngine implements OpponentEngine {
   dispose() { this.client.dispose(); }
 }
 
-export class RivalCoach implements CoachEngine {
-  private client: StockfishClient;
-  constructor(onStatus?: EngineStatusListener) { this.client = new StockfishClient(onStatus); }
-  async analyze(fen: string) {
-    const result = await this.client.search(fen, { elo: null, movetimeMs: 1800, multiPv: 4 });
-    return {
-      candidates: result.candidates,
-      depth: result.depth,
-      engine: result.engine,
-      nodes: result.nodes,
-      nps: result.nps,
-      timeMs: result.timeMs,
-      wdl: result.wdl,
-    };
-  }
-  dispose() { this.client.dispose(); }
-}
-
 export class RivalAssistant implements AssistantEngine {
   private client: StockfishClient;
+  private cache = new Map<string, { quick?: SearchResult; deep?: SearchResult }>();
   constructor(onStatus?: EngineStatusListener) { this.client = new StockfishClient(onStatus); }
-  async analyze(fen: string) {
-    const result = await this.client.search(fen, { elo: null, movetimeMs: 520, multiPv: 3 });
-    return {
+  peek(fen: string) {
+    const entry = this.cache.get(fen);
+    const result = entry?.deep ?? entry?.quick;
+    return result ? { ...result, cached: true } : null;
+  }
+  async analyze(fen: string, mode: "quick" | "deep" = "quick") {
+    const cached = mode === "quick" ? this.cache.get(fen)?.deep ?? this.cache.get(fen)?.quick : this.cache.get(fen)?.deep;
+    if (cached) return { ...cached, cached: true };
+    const result = await this.client.search(fen, mode === "deep"
+      ? { elo: null, movetimeMs: 1800, multiPv: 4 }
+      : { elo: null, movetimeMs: 520, multiPv: 3 });
+    const clean: SearchResult = {
       candidates: result.candidates,
       depth: result.depth,
       engine: result.engine,
@@ -338,6 +326,11 @@ export class RivalAssistant implements AssistantEngine {
       timeMs: result.timeMs,
       wdl: result.wdl,
     };
+    const entry = this.cache.get(fen) ?? {};
+    entry[mode] = clean;
+    this.cache.set(fen, entry);
+    if (this.cache.size > 48) this.cache.delete(this.cache.keys().next().value!);
+    return clean;
   }
   dispose() { this.client.dispose(); }
 }

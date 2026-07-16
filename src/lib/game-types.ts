@@ -29,6 +29,7 @@ export type SearchResult = {
   nps: number;
   engine: string;
   wdl?: { win: number; draw: number; loss: number };
+  cached?: boolean;
 };
 
 export type AssistantSnapshot = {
@@ -51,8 +52,23 @@ export type MoveDecision = {
   source: DecisionSource;
   coachLevel?: CoachLevel;
   suggestedMoves: string[];
+  playerIdea?: string;
+  confidence?: "unsure" | "considered" | "confident";
   delta?: number;
   severity?: AssistantSnapshot["severity"];
+};
+
+export type ReviewPosition = {
+  id: string;
+  fen: string;
+  bestMoveUci: string;
+  bestMoveSan: string;
+  playedMove: string;
+  reason: "mistake" | "blunder" | "coach-diverged";
+  playerColor: PlayerColor;
+  createdAt: string;
+  attempts: number;
+  solved: boolean;
 };
 
 export type EngineStatus = "loading" | "ready" | "error";

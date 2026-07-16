@@ -53,9 +53,27 @@ export function learningScore(timeline: AssistantSnapshot[], decisions: MoveDeci
 }
 
 export function adaptiveProgress(profile: PlayerProfile) {
-  if (!profile.recentResults.length) return 20;
+  if (!profile.recentResults.length) return 0;
   const score = profile.recentResults.reduce((sum, result) => sum + (result === "win" ? 1 : result === "draw" ? 0.5 : 0), 0);
-  return Math.round(Math.min(100, score / Math.max(3.5, profile.recentResults.length) * 100));
+  const form = score / Math.max(1, profile.recentResults.length) * 100;
+  const quality = profile.independentMoves ? profile.independentAccuracy : 50;
+  return Math.round(Math.min(100, form * 0.55 + quality * 0.45));
+}
+
+export function adaptiveExplanation(profile: PlayerProfile) {
+  const gamesNeeded = Math.max(0, 4 - profile.recentResults.length);
+  const movesNeeded = Math.max(0, 20 - profile.independentMoves);
+  if (gamesNeeded) return `${gamesNeeded} more completed game${gamesNeeded === 1 ? "" : "s"} before RivalMind can adjust the challenge.`;
+  if (movesNeeded) return `${movesNeeded} more independent moves will make the strength decision more reliable.`;
+  if (profile.independentAccuracy >= 76) return "Your independent quality supports a harder rival if recent results stay strong.";
+  if (profile.independentAccuracy < 58) return "The rival will hold or ease only after a repeated low-quality pattern—not one difficult game.";
+  return "Your current rival matches the evidence so far. Results and independent quality must move together.";
+}
+
+export function coachRecommendation(profile: PlayerProfile) {
+  if (profile.independentMoves >= 80 && profile.independentAccuracy >= 82) return "Try one full game with the coach off.";
+  if (profile.independentMoves >= 40 && profile.independentAccuracy >= 70) return "Use clues first; reveal the move only after naming your candidate.";
+  return "Name your candidate before asking, then move through the clues one at a time.";
 }
 
 export function trainingRating(profile: PlayerProfile) {
@@ -68,9 +86,12 @@ export function advanceProfile(profile: PlayerProfile, result: GameResult, telem
   const formScore = recentResults.reduce((sum, item) => sum + (item === "win" ? 1 : item === "draw" ? 0.5 : 0), 0);
   const gameIndependentMoves = telemetry.independentMoves ?? 0;
   const gameIndependentAccuracy = telemetry.independentAccuracy ?? 0;
-  const independentSignal = gameIndependentMoves >= 4 ? gameIndependentAccuracy : null;
+  const blendedIndependentAccuracy = profile.independentMoves
+    ? Math.round((profile.independentAccuracy * Math.min(profile.independentMoves, 30) + gameIndependentAccuracy * gameIndependentMoves) / (Math.min(profile.independentMoves, 30) + gameIndependentMoves || 1))
+    : gameIndependentAccuracy;
+  const independentSignal = gameIndependentMoves >= 4 ? blendedIndependentAccuracy : null;
   const canAdjust = games - profile.lastLevelChangeGame >= 3 && recentResults.length >= 4;
-  const levelDelta = canAdjust && formScore >= 3 && (independentSignal === null || independentSignal >= 76) ? 1
+  const levelDelta = canAdjust && formScore >= 3 && independentSignal !== null && independentSignal >= 76 ? 1
     : canAdjust && formScore <= 1.5 && independentSignal !== null && independentSignal < 58 ? -1 : 0;
   const adaptiveLevel = Math.max(1, Math.min(10, profile.adaptiveLevel + levelDelta));
   const currentStreak = result === "win" ? profile.currentStreak + 1 : 0;

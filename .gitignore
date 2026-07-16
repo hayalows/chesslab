@@ -26,5 +26,8 @@ next-env.d.ts
 /public/stockfish/stockfish.worker.js
 /public/stockfish/Copying.txt
 
+# training data (downloaded by the model pipeline)
+/data/raw/
+
 # temporary scaffold
 /rivalmind-scaffold/
