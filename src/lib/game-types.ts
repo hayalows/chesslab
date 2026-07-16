@@ -9,6 +9,10 @@ export type SearchMove = {
   promotion?: string;
   score: number;
   captured?: string;
+  uci: string;
+  line: string[];
+  lineSan: string[];
+  wdl?: { win: number; draw: number; loss: number };
 };
 
 export type SearchResult = {
@@ -18,6 +22,20 @@ export type SearchResult = {
   timeMs: number;
   nps: number;
   engine: string;
+  wdl?: { win: number; draw: number; loss: number };
+};
+
+export type AssistantSnapshot = {
+  id: string;
+  ply: number;
+  fen: string;
+  actor: "You" | "Rival" | "Start";
+  move?: string;
+  whiteScore: number;
+  delta: number;
+  severity: "steady" | "inaccuracy" | "mistake" | "blunder";
+  result: SearchResult;
+  explanation: string;
 };
 
 export type EngineStatus = "loading" | "ready" | "error";

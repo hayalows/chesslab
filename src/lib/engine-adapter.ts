@@ -21,6 +21,8 @@ type AnalysisLine = {
   nps: number;
   score: number;
   timeMs: number;
+  pv: string[];
+  wdl?: { win: number; draw: number; loss: number };
 };
 
 type PendingSearch = {
@@ -78,6 +80,7 @@ function parseInfo(line: string): AnalysisLine | null {
   const scoreKind = tokens[scoreIndex + 1];
   const rawScore = Number(tokens[scoreIndex + 2]) || 0;
   const score = scoreKind === "mate" ? Math.sign(rawScore || 1) * (100_000 - Math.abs(rawScore)) : rawScore;
+  const wdlIndex = tokens.indexOf("wdl");
   return {
     depth: valueAfter(tokens, "depth"),
     move: tokens[pvIndex + 1],
@@ -86,16 +89,31 @@ function parseInfo(line: string): AnalysisLine | null {
     nps: valueAfter(tokens, "nps"),
     score,
     timeMs: valueAfter(tokens, "time"),
+    pv: tokens.slice(pvIndex + 1),
+    wdl: wdlIndex >= 0 ? {
+      win: Number(tokens[wdlIndex + 1]) || 0,
+      draw: Number(tokens[wdlIndex + 2]) || 0,
+      loss: Number(tokens[wdlIndex + 3]) || 0,
+    } : undefined,
   };
 }
 
-function toSearchMove(fen: string, uci: string, score = 0): SearchMove {
+function toSearchMove(fen: string, uci: string, score = 0, pv: string[] = [uci], wdl?: { win: number; draw: number; loss: number }): SearchMove {
   const chess = new Chess(fen);
   const from = uci.slice(0, 2);
   const to = uci.slice(2, 4);
   const promotion = uci[4];
   const move = chess.move({ from, to, promotion: promotion || "q" });
   if (!move) throw new Error(`Stockfish returned an invalid move: ${uci}`);
+  const lineGame = new Chess(fen);
+  const lineSan: string[] = [];
+  for (const pvMove of pv) {
+    try {
+      const played = lineGame.move({ from: pvMove.slice(0, 2), to: pvMove.slice(2, 4), promotion: pvMove[4] || "q" });
+      if (!played) break;
+      lineSan.push(played.san);
+    } catch { break; }
+  }
   return {
     from,
     to,
@@ -103,6 +121,10 @@ function toSearchMove(fen: string, uci: string, score = 0): SearchMove {
     promotion: move.promotion,
     captured: move.captured,
     score,
+    uci,
+    line: pv,
+    lineSan,
+    wdl,
   };
 }
 
@@ -117,6 +139,7 @@ class StockfishClient {
   private disposed = false;
   private supportsElo = false;
   private supportsLimitStrength = false;
+  private supportsWdl = false;
   private readonly ready: Promise<void>;
 
   constructor(private onStatus?: EngineStatusListener) {
@@ -151,6 +174,7 @@ class StockfishClient {
     if (line.startsWith("id name ")) this.engineName = line.slice(8);
     if (line.startsWith("option name UCI_Elo ")) this.supportsElo = true;
     if (line.startsWith("option name UCI_LimitStrength ")) this.supportsLimitStrength = true;
+    if (line.startsWith("option name UCI_ShowWDL ")) this.supportsWdl = true;
     if (line === "uciok") {
       if (!this.supportsElo || !this.supportsLimitStrength) {
         this.fail(new Error("This Stockfish build does not expose Elo strength controls."));
@@ -158,6 +182,7 @@ class StockfishClient {
       }
       this.post("setoption name Threads value 1");
       this.post("setoption name Hash value 16");
+      if (this.supportsWdl) this.post("setoption name UCI_ShowWDL value true");
       this.post("isready");
       return;
     }
@@ -199,8 +224,8 @@ class StockfishClient {
     try {
       const lines = [...pending.analyses.values()].sort((a, b) => a.multipv - b.multipv);
       const bestLine = lines.find((line) => line.move === bestUci) ?? lines[0];
-      const bestMove = toSearchMove(pending.fen, bestUci, bestLine?.score ?? 0);
-      const candidates = lines.map((line) => toSearchMove(pending.fen, line.move, line.score));
+      const bestMove = toSearchMove(pending.fen, bestUci, bestLine?.score ?? 0, bestLine?.pv, bestLine?.wdl);
+      const candidates = lines.map((line) => toSearchMove(pending.fen, line.move, line.score, line.pv, line.wdl));
       if (!candidates.some((move) => move.from === bestMove.from && move.to === bestMove.to)) candidates.unshift(bestMove);
       pending.resolve({
         bestMove,
@@ -210,6 +235,7 @@ class StockfishClient {
         nodes: Math.max(0, ...lines.map((line) => line.nodes)),
         nps: Math.max(0, ...lines.map((line) => line.nps)),
         timeMs: Math.max(0, ...lines.map((line) => line.timeMs)),
+        wdl: bestLine?.wdl,
       });
     } catch (error) {
       pending.reject(error instanceof Error ? error : new Error("Stockfish returned an unreadable line."));
@@ -260,6 +286,11 @@ export interface CoachEngine {
   dispose(): void;
 }
 
+export interface AssistantEngine {
+  analyze(fen: string): Promise<SearchResult>;
+  dispose(): void;
+}
+
 export class RivalEngine implements OpponentEngine {
   private client: StockfishClient;
   constructor(onStatus?: EngineStatusListener) { this.client = new StockfishClient(onStatus); }
@@ -282,6 +313,25 @@ export class RivalCoach implements CoachEngine {
       nodes: result.nodes,
       nps: result.nps,
       timeMs: result.timeMs,
+      wdl: result.wdl,
+    };
+  }
+  dispose() { this.client.dispose(); }
+}
+
+export class RivalAssistant implements AssistantEngine {
+  private client: StockfishClient;
+  constructor(onStatus?: EngineStatusListener) { this.client = new StockfishClient(onStatus); }
+  async analyze(fen: string) {
+    const result = await this.client.search(fen, { elo: null, movetimeMs: 520, multiPv: 3 });
+    return {
+      candidates: result.candidates,
+      depth: result.depth,
+      engine: result.engine,
+      nodes: result.nodes,
+      nps: result.nps,
+      timeMs: result.timeMs,
+      wdl: result.wdl,
     };
   }
   dispose() { this.client.dispose(); }

@@ -9,7 +9,9 @@ import {
   opponentStrengthLabel,
   RivalCoach,
   RivalEngine,
+  RivalAssistant,
 } from "@/lib/engine-adapter";
+import { buildSnapshot } from "@/lib/assistant-insights";
 import {
   DEFAULT_PROFILE,
   type CoachLevel,
@@ -18,7 +20,11 @@ import {
   type GameResult,
   type PlayerProfile,
   type SearchResult,
+  type AssistantSnapshot,
 } from "@/lib/game-types";
+import GameAssistant from "./GameAssistant";
+import AuthMenu from "./AuthMenu";
+import { loadCloudProfile, syncCompletedGame } from "@/lib/cloud-sync";
 import styles from "./RivalMindGame.module.css";
 
 const PROFILE_KEY = "rivalmind-player-profile-v1";
@@ -75,6 +81,8 @@ export default function RivalMindGame() {
   const gameRef = useRef(new Chess());
   const opponentRef = useRef<RivalEngine | null>(null);
   const coachRef = useRef<RivalCoach | null>(null);
+  const assistantRef = useRef<RivalAssistant | null>(null);
+  const lastAssistantScoreRef = useRef<number | undefined>(undefined);
   const gameVersionRef = useRef(0);
   const gameFinishedRef = useRef(false);
   const [fen, setFen] = useState(() => new Chess().fen());
@@ -88,6 +96,11 @@ export default function RivalMindGame() {
   const [lastSearch, setLastSearch] = useState<{ actor: "Rival" | "Coach"; nodes: number; depth: number; timeMs: number; engine: string } | null>(null);
   const [rivalEngineStatus, setRivalEngineStatus] = useState<EngineStatus>("loading");
   const [coachEngineStatus, setCoachEngineStatus] = useState<EngineStatus>("loading");
+  const [assistantEngineStatus, setAssistantEngineStatus] = useState<EngineStatus>("loading");
+  const [assistantEnabled, setAssistantEnabled] = useState(true);
+  const [assistantThinking, setAssistantThinking] = useState(false);
+  const [assistantTimeline, setAssistantTimeline] = useState<AssistantSnapshot[]>([]);
+  const [latestAssistant, setLatestAssistant] = useState<AssistantSnapshot | null>(null);
   const [engineName, setEngineName] = useState("Stockfish WASM");
   const [lastMove, setLastMove] = useState<{ from: string; to: string } | null>(null);
   const [moveHistory, setMoveHistory] = useState<string[]>([]);
@@ -102,6 +115,15 @@ export default function RivalMindGame() {
       setEngineName(name);
     });
     coachRef.current = new RivalCoach((status) => setCoachEngineStatus(status));
+    const assistant = new RivalAssistant((status) => setAssistantEngineStatus(status));
+    assistantRef.current = assistant;
+    const startFen = new Chess().fen();
+    void assistant.analyze(startFen).then((result) => {
+      const snapshot = buildSnapshot({ ply: 0, fen: startFen, actor: "Start", result });
+      lastAssistantScoreRef.current = snapshot.whiteScore;
+      setLatestAssistant(snapshot);
+      setAssistantTimeline([snapshot]);
+    }).catch(() => undefined);
     let savedProfile: PlayerProfile | null = null;
     try {
       const saved = window.localStorage.getItem(PROFILE_KEY);
@@ -114,9 +136,13 @@ export default function RivalMindGame() {
       if (profileToRestore) setProfile(profileToRestore);
       setProfileReady(true);
     });
+    void loadCloudProfile().then((cloudProfile) => {
+      if (cloudProfile) setProfile((current) => cloudProfile.games > current.games ? cloudProfile : current);
+    });
     return () => {
       opponentRef.current?.dispose();
       coachRef.current?.dispose();
+      assistantRef.current?.dispose();
     };
   }, []);
 
@@ -182,9 +208,36 @@ export default function RivalMindGame() {
     gameFinishedRef.current = true;
     const game = gameRef.current;
     const result: GameResult = game.isCheckmate() ? (game.turn() === "b" ? "win" : "loss") : "draw";
+    const gameSummary = createSummary(game, result, hintsThisGame);
     recordResult(result);
-    setSummary(createSummary(game, result, hintsThisGame));
+    setSummary(gameSummary);
     setMessage(resultLabel(result));
+    const syncedProfile: PlayerProfile = {
+      ...profile,
+      games: profile.games + 1,
+      wins: profile.wins + (result === "win" ? 1 : 0),
+      losses: profile.losses + (result === "loss" ? 1 : 0),
+      draws: profile.draws + (result === "draw" ? 1 : 0),
+      adaptiveLevel: Math.max(1, Math.min(10, profile.adaptiveLevel + (result === "win" ? 1 : result === "loss" ? -1 : 0))),
+      recentResults: [...profile.recentResults, result].slice(-5),
+    };
+    void syncCompletedGame({ game, difficulty, profile: syncedProfile, summary: gameSummary, timeline: assistantTimeline, assistantEnabled }).catch(() => setMessage(`${resultLabel(result)} · Cloud sync will retry next game.`));
+  }
+
+  async function updateAssistant(position: string, actor: AssistantSnapshot["actor"], move: string | undefined, ply: number, force = false) {
+    if (!assistantEnabled && !force) return;
+    const version = gameVersionRef.current;
+    setAssistantThinking(true);
+    try {
+      const result = await assistantRef.current?.analyze(position);
+      if (!result || version !== gameVersionRef.current) return;
+      const snapshot = buildSnapshot({ ply, fen: position, actor, move, result, previousWhiteScore: lastAssistantScoreRef.current });
+      lastAssistantScoreRef.current = snapshot.whiteScore;
+      setLatestAssistant(snapshot);
+      setAssistantTimeline((items) => [...items.filter((item) => item.ply !== ply), snapshot].sort((a, b) => a.ply - b.ply));
+    } finally {
+      if (version === gameVersionRef.current) setAssistantThinking(false);
+    }
   }
 
   async function requestRivalMove(position: string) {
@@ -197,11 +250,13 @@ export default function RivalMindGame() {
       const result = await engine.chooseMove(position, difficulty, profile);
       if (version !== gameVersionRef.current) return;
       gameRef.current.move({ from: result.move.from, to: result.move.to, promotion: result.move.promotion ?? "q" });
+      const rivalSan = gameRef.current.history().at(-1);
       setFen(gameRef.current.fen());
       setMoveHistory(gameRef.current.history());
       setLastMove({ from: result.move.from, to: result.move.to });
       setLastSearch({ actor: "Rival", nodes: result.nodes, depth: result.depth, timeMs: result.timeMs, engine: result.engine });
       setMessage(gameRef.current.isCheck() ? "Your king is in check." : "Your move.");
+      void updateAssistant(gameRef.current.fen(), "Rival", rivalSan, gameRef.current.history().length);
       if (gameRef.current.isGameOver()) finishGame();
     } catch {
       if (version === gameVersionRef.current) setMessage("Stockfish could not finish that search. Reload the page to restart the engine.");
@@ -221,6 +276,7 @@ export default function RivalMindGame() {
       setLastMove({ from, to });
       setSelectedSquare(null);
       setCoachResult(null);
+      void updateAssistant(nextFen, "You", move.san, gameRef.current.history().length);
       if (gameRef.current.isGameOver()) finishGame();
       else void requestRivalMove(nextFen);
       return true;
@@ -279,7 +335,11 @@ export default function RivalMindGame() {
     setSelectedSquare(null);
     setHintsThisGame(0);
     setSummary(null);
+    lastAssistantScoreRef.current = undefined;
+    setLatestAssistant(null);
+    setAssistantTimeline([]);
     setMessage("Your move. You are playing White.");
+    if (assistantEnabled) void updateAssistant(gameRef.current.fen(), "Start", undefined, 0);
   }
 
   const gameOver = renderGame.isGameOver();
@@ -298,6 +358,7 @@ export default function RivalMindGame() {
           <span><b>{profile.games}</b> games</span>
           <span><b>{profile.wins}</b> wins</span>
           <span>Level <b>{profile.adaptiveLevel}</b></span>
+          <AuthMenu />
         </div>
       </header>
 
@@ -444,7 +505,22 @@ export default function RivalMindGame() {
         </aside>
       </section>
 
-      <footer><span>RivalMind · Private practice, stored on this device.</span><span><a href="https://github.com/lichess-org/stockfish.wasm" target="_blank" rel="noreferrer">Stockfish WASM</a> engine · legal moves by chess.js</span></footer>
+      <div className={styles.assistantDock}>
+        <GameAssistant
+          enabled={assistantEnabled}
+          onToggle={() => {
+            const next = !assistantEnabled;
+            setAssistantEnabled(next);
+            if (next) void updateAssistant(gameRef.current.fen(), moveHistory.length ? (gameRef.current.turn() === "w" ? "Rival" : "You") : "Start", moveHistory.at(-1), moveHistory.length, true);
+          }}
+          status={assistantEngineStatus}
+          thinking={assistantThinking}
+          latest={latestAssistant}
+          timeline={assistantTimeline}
+        />
+      </div>
+
+      <footer><span>RivalMind · Guest-first with secure cloud sync.</span><span><a href="https://github.com/lichess-org/stockfish.wasm" target="_blank" rel="noreferrer">Stockfish WASM</a> engine · legal moves by chess.js</span></footer>
 
       {summary && (
         <div className={styles.modalBackdrop} role="presentation">
