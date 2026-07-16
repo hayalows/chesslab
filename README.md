@@ -2,6 +2,8 @@
 
 A calm, single-player chess practice room. Play legal chess against a worker-backed opponent, ask an independent coach for help at four disclosure levels, and build a lightweight adaptive player profile stored only in the browser.
 
+**Play online:** [chesslab-gamma.vercel.app](https://chesslab-gamma.vercel.app)
+
 ## Run locally
 
 ```bash
