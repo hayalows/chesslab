@@ -1,6 +1,7 @@
 export type Difficulty = "easy" | "medium" | "hard" | "adaptive";
 export type CoachLevel = "off" | "gentle" | "candidates" | "best";
 export type GameResult = "win" | "loss" | "draw";
+export type GameTermination = "checkmate" | "timeout" | "stalemate" | "threefold-repetition" | "insufficient-material" | "fifty-move-rule" | "draw";
 export type TimeControl = "open" | "rapid10" | "steady15";
 
 export type SearchMove = {
@@ -74,6 +75,10 @@ export type GameTelemetry = {
 
 export type PostGameSummary = {
   result: GameResult;
+  termination: GameTermination;
+  outcomeTitle: string;
+  outcomeDetail: string;
+  scoreline: string;
   headline: string;
   well: string;
   watch: string;

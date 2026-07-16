@@ -303,7 +303,7 @@ export class RivalCoach implements CoachEngine {
   private client: StockfishClient;
   constructor(onStatus?: EngineStatusListener) { this.client = new StockfishClient(onStatus); }
   async analyze(fen: string) {
-    const result = await this.client.search(fen, { elo: null, movetimeMs: 700, multiPv: 4 });
+    const result = await this.client.search(fen, { elo: null, movetimeMs: 1200, multiPv: 4 });
     return {
       candidates: result.candidates,
       depth: result.depth,

@@ -78,7 +78,7 @@ export async function syncCompletedGame(args: {
     opponent_elo: settings.elo,
     pgn: args.game.pgn(),
     final_fen: args.game.fen(),
-    summary: { headline: args.summary.headline, well: args.summary.well, watch: args.summary.watch, keyMoment: args.summary.keyMoment, newMilestones: args.summary.newMilestones },
+    summary: { outcomeTitle: args.summary.outcomeTitle, outcomeDetail: args.summary.outcomeDetail, scoreline: args.summary.scoreline, termination: args.summary.termination, headline: args.summary.headline, well: args.summary.well, watch: args.summary.watch, keyMoment: args.summary.keyMoment, newMilestones: args.summary.newMilestones },
     time_control: args.summary.telemetry.timeControl,
     total_time_ms: args.summary.telemetry.totalTimeMs,
     player_think_ms: args.summary.telemetry.playerThinkMs,

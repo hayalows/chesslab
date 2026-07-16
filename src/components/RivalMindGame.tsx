@@ -31,6 +31,7 @@ import AuthMenu from "./AuthMenu";
 import { loadCloudProfile, syncCompletedGame } from "@/lib/cloud-sync";
 import { adaptiveProgress, advanceProfile, formatClock, formatDuration, learningScore, TIME_CONTROLS } from "@/lib/training-analytics";
 import { useGameClock } from "@/lib/use-game-clock";
+import { createPostGameSummary } from "@/lib/post-game-summary";
 import styles from "./RivalMindGame.module.css";
 
 const PROFILE_KEY = "rivalmind-player-profile-v1";
@@ -46,22 +47,6 @@ function resultLabel(result: GameResult) {
   return result === "win" ? "You won" : result === "loss" ? "Rival won" : "Draw";
 }
 
-function createSummary(game: Chess, result: GameResult, telemetry: GameTelemetry, timeline: AssistantSnapshot[], newMilestones: string[]): PostGameSummary {
-  const playerMoves = game.history({ verbose: true }).filter((_, index) => index % 2 === 0);
-  const castled = playerMoves.some((move) => move.san === "O-O" || move.san === "O-O-O");
-  const decisions = timeline.filter((item) => item.actor === "You");
-  const worst = [...decisions].sort((a, b) => a.delta - b.delta)[0];
-  const headline = result === "win" ? "A strong training win" : result === "draw" ? "A balanced fight" : "A useful game to learn from";
-  const well = telemetry.accuracy >= 85 ? `You matched Stockfish’s first choice on ${telemetry.bestMoveMatches} of ${telemetry.analyzedMoves} analyzed decisions.`
-    : castled ? "You gave your king a safer home before the position became sharp."
-      : "You completed a full game and created a clear review trail.";
-  const watch = worst && worst.severity !== "steady" ? `Revisit ${worst.move}. The evaluation changed by ${Math.abs(worst.delta / 100).toFixed(2)} pawns.`
-    : telemetry.coachUses > 2 ? "Try choosing your own candidate before asking the coach."
-      : "Keep checking your opponent’s forcing moves before you commit.";
-  const keyMoment = worst ? `${worst.move}: ${worst.explanation}` : "Stockfish did not flag a major evaluation swing in the analyzed moves.";
-  return { result, headline, well, watch, keyMoment, telemetry, newMilestones };
-}
-
 function gentleHint(result: SearchResult) {
   const move = result.candidates[0];
   if (!move) return "Take a breath and scan every check, capture, and threat.";
@@ -69,6 +54,16 @@ function gentleHint(result: SearchResult) {
   if (move.san.includes("+")) return "A check can improve your position with tempo here.";
   if (["d4", "d5", "e4", "e5"].includes(move.to)) return "The center is asking for more attention. Look for a move that increases your influence there.";
   return "One of your pieces can become more active without creating a new weakness.";
+}
+
+function coachPositionGuidance(result: SearchResult) {
+  const score = result.candidates[0]?.score;
+  if (score === undefined) return "Stockfish is still forming its view of the position.";
+  if (score < -90_000) return "Stockfish sees a forced mate against you. The coach can explain the line, but no move guarantees recovery.";
+  if (score <= -300) return "Recovery mode: you are clearly worse, so the coach is finding the move that preserves the best practical chances.";
+  if (score <= -100) return "You are under pressure, but the game is still playable. The top move limits further damage.";
+  if (score >= 300) return "You have a winning advantage. The priority now is converting it without giving counterplay.";
+  return "The game is still competitive. This move gives Stockfish’s best balance of safety and activity.";
 }
 
 function evaluationLabel(score: number | undefined) {
@@ -234,7 +229,7 @@ export default function RivalMindGame({ timeControl = "open" }: { timeControl?: 
     };
     const advanced = advanceProfile(profile, result, baseTelemetry);
     const telemetry: GameTelemetry = { ...baseTelemetry, adaptiveAfter: advanced.profile.adaptiveLevel, trainingPointsEarned: advanced.points };
-    const gameSummary = createSummary(game, result, telemetry, assistantTimeline, advanced.newMilestones);
+    const gameSummary = createPostGameSummary({ game, result, endedOnTime: Boolean(forcedResult), telemetry, timeline: assistantTimeline, newMilestones: advanced.newMilestones });
     setProfile(advanced.profile);
     setSummary(gameSummary);
     setMessage(forcedResult ? `${resultLabel(result)} on time` : resultLabel(result));
@@ -504,9 +499,10 @@ export default function RivalMindGame({ timeControl = "open" }: { timeControl?: 
               ) : !coachResult ? (
                 <div className={styles.emptyCoach}><span>↗</span><p>Ask for help only when you want it. Your opponent stays separate.</p></div>
               ) : coachLevel === "gentle" ? (
-                <div className={styles.coachAdvice}><span className={styles.adviceLabel}>A gentle nudge</span><p>{gentleHint(coachResult)}</p></div>
+                <div className={styles.coachAdvice}><p className={styles.coachPosition}>{coachPositionGuidance(coachResult)}</p><span className={styles.adviceLabel}>A gentle nudge</span><p>{gentleHint(coachResult)}</p></div>
               ) : (
                 <div className={styles.coachAdvice}>
+                  <p className={styles.coachPosition}>{coachPositionGuidance(coachResult)}</p>
                   <span className={styles.adviceLabel}>{coachLevel === "best" ? "Best move" : "Candidate moves"}</span>
                   <div className={styles.candidateList}>
                     {coachResult.candidates.slice(0, coachLevel === "best" ? 1 : 3).map((move, index) => (
@@ -554,9 +550,11 @@ export default function RivalMindGame({ timeControl = "open" }: { timeControl?: 
       {summary && (
         <div className={styles.modalBackdrop} role="presentation">
           <section className={styles.summaryCard} role="dialog" aria-modal="true" aria-labelledby="game-summary-title">
-            <span className={styles.summaryMark}>{summary.result === "win" ? "✓" : summary.result === "loss" ? "×" : "½"}</span>
-            <span className={styles.eyebrow}>Training complete · +{summary.telemetry.trainingPointsEarned} points</span>
-            <h2 id="game-summary-title">{summary.headline}</h2>
+            <div className={`${styles.outcomeHero} ${summary.result === "win" ? styles.outcomeWin : summary.result === "loss" ? styles.outcomeLoss : styles.outcomeDraw}`}>
+              <div><span className={styles.outcomeBadge}>{summary.result}</span><h2 id="game-summary-title">{summary.outcomeTitle}</h2><p>{summary.outcomeDetail}</p></div>
+              <div className={styles.scoreline}><span>You</span><b>{summary.scoreline}</b><span>Rival</span></div>
+            </div>
+            <div className={styles.summaryIntro}><span className={styles.eyebrow}>Training complete · +{summary.telemetry.trainingPointsEarned} points</span><p>{summary.headline}</p></div>
             <div className={styles.reviewStats}>
               <span>Time spent<b>{formatDuration(summary.telemetry.totalTimeMs)}</b></span>
               <span>Your thinking<b>{formatDuration(summary.telemetry.playerThinkMs)}</b></span>
