@@ -1,16 +1,15 @@
 import type { Chess } from "chess.js";
 import { opponentSettings } from "./engine-adapter";
-import type { AssistantSnapshot, Difficulty, GameResult, PlayerProfile } from "./game-types";
+import type { AssistantSnapshot, Difficulty, PlayerProfile, PostGameSummary } from "./game-types";
 import { createClient } from "./supabase/client";
-
-type Summary = { result: GameResult; well: string; watch: string };
+import { trainingRating } from "./training-analytics";
 
 export async function loadCloudProfile(): Promise<PlayerProfile | null> {
   const supabase = createClient();
   if (!supabase) return null;
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return null;
-  const { data } = await supabase.from("profiles").select("total_games,wins,losses,draws,hint_usage,adaptive_level").maybeSingle();
+  const { data } = await supabase.from("profiles").select("total_games,wins,losses,draws,hint_usage,adaptive_level,training_points,training_minutes,current_streak,best_streak,last_level_change_game,milestones").maybeSingle();
   if (!data) return null;
   return {
     games: data.total_games,
@@ -20,6 +19,12 @@ export async function loadCloudProfile(): Promise<PlayerProfile | null> {
     hintUsage: data.hint_usage,
     adaptiveLevel: data.adaptive_level,
     recentResults: [],
+    trainingPoints: data.training_points,
+    trainingMinutes: data.training_minutes,
+    currentStreak: data.current_streak,
+    bestStreak: data.best_streak,
+    lastLevelChangeGame: data.last_level_change_game,
+    milestones: Array.isArray(data.milestones) ? data.milestones : [],
   };
 }
 
@@ -38,6 +43,13 @@ export async function syncProfile(profile: PlayerProfile, assistantEnabled: bool
     hint_usage: profile.hintUsage,
     adaptive_level: profile.adaptiveLevel,
     assistant_enabled: assistantEnabled,
+    rating: trainingRating(profile),
+    training_points: profile.trainingPoints,
+    training_minutes: profile.trainingMinutes,
+    current_streak: profile.currentStreak,
+    best_streak: profile.bestStreak,
+    last_level_change_game: profile.lastLevelChangeGame,
+    milestones: profile.milestones,
     updated_at: new Date().toISOString(),
   }, { onConflict: "user_id" });
   if (error) throw error;
@@ -48,7 +60,7 @@ export async function syncCompletedGame(args: {
   game: Chess;
   difficulty: Difficulty;
   profile: PlayerProfile;
-  summary: Summary;
+  summary: PostGameSummary;
   timeline: AssistantSnapshot[];
   assistantEnabled: boolean;
 }) {
@@ -66,7 +78,19 @@ export async function syncCompletedGame(args: {
     opponent_elo: settings.elo,
     pgn: args.game.pgn(),
     final_fen: args.game.fen(),
-    summary: { well: args.summary.well, watch: args.summary.watch },
+    summary: { headline: args.summary.headline, well: args.summary.well, watch: args.summary.watch, keyMoment: args.summary.keyMoment, newMilestones: args.summary.newMilestones },
+    time_control: args.summary.telemetry.timeControl,
+    total_time_ms: args.summary.telemetry.totalTimeMs,
+    player_think_ms: args.summary.telemetry.playerThinkMs,
+    rival_think_ms: args.summary.telemetry.rivalThinkMs,
+    coach_uses: args.summary.telemetry.coachUses,
+    coach_time_ms: args.summary.telemetry.coachTimeMs,
+    accuracy: args.summary.telemetry.analyzedMoves ? args.summary.telemetry.accuracy : null,
+    best_move_matches: args.summary.telemetry.bestMoveMatches,
+    analyzed_moves: args.summary.telemetry.analyzedMoves,
+    adaptive_before: args.summary.telemetry.adaptiveBefore,
+    adaptive_after: args.summary.telemetry.adaptiveAfter,
+    training_points_earned: args.summary.telemetry.trainingPointsEarned,
     completed_at: new Date().toISOString(),
   }).select("id").single();
   if (gameError) throw gameError;
@@ -93,4 +117,33 @@ export async function syncCompletedGame(args: {
     const { error } = await supabase.from("moves").insert(rows);
     if (error) throw error;
   }
+  const { error: ratingError } = await supabase.from("rating_history").insert({ user_id: user.id, game_id: gameRow.id, rating: trainingRating(args.profile) });
+  if (ratingError) throw ratingError;
+  if (args.summary.newMilestones.length) {
+    const { error: achievementError } = await supabase.from("achievements").upsert(args.summary.newMilestones.map((name) => ({
+      user_id: user.id,
+      code: name.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, ""),
+      name,
+      description: "Unlocked through your RivalMind training journey.",
+      unlocked_at: new Date().toISOString(),
+    })), { onConflict: "user_id,code" });
+    if (achievementError) throw achievementError;
+  }
+  const playerMoves = verbose.filter((_, index) => index % 2 === 0);
+  const forcingMoves = playerMoves.filter((move) => Boolean(move.captured) || move.san.includes("+")).length;
+  const earlyCastle = playerMoves.slice(0, 10).some((move) => move.san === "O-O" || move.san === "O-O-O");
+  const { data: currentStats } = await supabase.from("player_stats").select("style_metrics,average_accuracy,analyzed_games").maybeSingle();
+  const oldMetrics = (currentStats?.style_metrics ?? {}) as { forcing_moves?: number; player_moves?: number; early_castles?: number };
+  const metrics = {
+    forcing_moves: (oldMetrics.forcing_moves ?? 0) + forcingMoves,
+    player_moves: (oldMetrics.player_moves ?? 0) + playerMoves.length,
+    early_castles: (oldMetrics.early_castles ?? 0) + (earlyCastle ? 1 : 0),
+  };
+  const analyzedGames = (currentStats?.analyzed_games ?? 0) + 1;
+  const forcingRate = metrics.forcing_moves / Math.max(1, metrics.player_moves);
+  const castleRate = metrics.early_castles / Math.max(1, analyzedGames);
+  const styleLabel = analyzedGames < 20 ? null : forcingRate >= 0.32 ? "Tactical explorer" : castleRate >= 0.7 ? "Patient planner" : "Balanced builder";
+  const averageAccuracy = !args.summary.telemetry.analyzedMoves ? currentStats?.average_accuracy ?? null : currentStats?.average_accuracy == null ? args.summary.telemetry.accuracy : ((Number(currentStats.average_accuracy) * Math.max(0, analyzedGames - 1)) + args.summary.telemetry.accuracy) / analyzedGames;
+  const { error: statsError } = await supabase.from("player_stats").upsert({ user_id: user.id, style_metrics: metrics, style_label: styleLabel, average_accuracy: averageAccuracy, analyzed_games: analyzedGames, last_calculated_at: new Date().toISOString(), updated_at: new Date().toISOString() }, { onConflict: "user_id" });
+  if (statsError) throw statsError;
 }

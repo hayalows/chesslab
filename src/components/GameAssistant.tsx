@@ -46,24 +46,24 @@ export default function GameAssistant({ enabled, onToggle, status, thinking, lat
               </div>}
 
               <details className={styles.insightCard} open>
-                <summary><span><i>01</i><b>Why did it change?</b></span><em>{latest.delta > 20 ? "Better" : latest.delta < -20 ? "Worse" : "Stable"}</em></summary>
+                <summary><span><b>Why did the position change?</b></span><em>{latest.delta > 20 ? "Better for you" : latest.delta < -20 ? "Worse for you" : "About the same"}</em></summary>
                 <p>{latest.explanation}</p>
-                <div className={styles.evidenceLine}>Evidence line <b>{main?.lineSan.slice(0, 5).join(" ") || "Building…"}</b></div>
+                <div className={styles.evidenceLine}>Stockfish expects <b>{main?.lineSan.slice(0, 5).join(" ") || "Still checking…"}</b></div>
               </details>
 
               <details className={styles.insightCard}>
-                <summary><span><i>02</i><b>Move alternatives</b></span><em>{result.candidates.length} lines</em></summary>
+                <summary><span><b>Other moves to consider</b></span><em>{result.candidates.length} ideas</em></summary>
                 <div className={styles.alternatives}>{result.candidates.slice(0, 3).map((move, index) => <div key={move.uci}><span>{index + 1}</span><p><b>{move.san}</b>{explainCandidate(move, main?.score ?? move.score, index)}</p><em>{evaluation(latest.fen.split(" ")[1] === "w" ? move.score : -move.score)}</em></div>)}</div>
               </details>
 
               <details className={styles.insightCard}>
-                <summary><span><i>03</i><b>Tactical radar</b></span><em>{radar.label}</em></summary>
+                <summary><span><b>Checks, captures and threats</b></span><em>{radar.label}</em></summary>
                 <p>{radar.text}</p>
                 <p className={styles.guardrail}>RivalMind does not label a fork, pin, or skewer unless it can verify it in the displayed engine line.</p>
               </details>
 
               <details className={styles.insightCard}>
-                <summary><span><i>04</i><b>Advanced search</b></span><em>{certainty?.label} confidence</em></summary>
+                <summary><span><b>Stockfish details</b></span><em>{certainty?.label} confidence</em></summary>
                 <p>{certainty?.detail}</p>
                 <div className={styles.advancedGrid}><span>Depth<b>{result.depth}</b></span><span>Nodes<b>{result.nodes.toLocaleString()}</b></span><span>Speed<b>{result.nps.toLocaleString()}/s</b></span><span>Time<b>{(result.timeMs / 1000).toFixed(2)}s</b></span></div>
               </details>

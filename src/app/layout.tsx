@@ -6,8 +6,8 @@ const body = DM_Sans({ variable: "--font-body", subsets: ["latin"] });
 const display = Manrope({ variable: "--font-display", subsets: ["latin"] });
 
 export const metadata: Metadata = {
-  title: "RivalMind — Play. Think. Improve.",
-  description: "A calm chess room with an adaptive rival and a coach that meets you where you are.",
+  title: "RivalMind — Chess training that explains itself",
+  description: "Play Stockfish, understand every turning point, and build a training path that adapts to you.",
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {

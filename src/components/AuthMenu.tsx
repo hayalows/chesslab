@@ -1,17 +1,20 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import type { User } from "@supabase/supabase-js";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
-import { isGoogleAuthEnabled } from "@/lib/supabase/config";
-import styles from "./RivalMindGame.module.css";
+import styles from "./AuthMenu.module.css";
 
-export default function AuthMenu() {
+type Props = { triggerLabel?: string; redirectTo?: string; prominent?: boolean };
+
+export default function AuthMenu({ triggerLabel = "Save progress", redirectTo = "/dashboard", prominent = false }: Props) {
   const [user, setUser] = useState<User | null>(null);
   const [open, setOpen] = useState(false);
   const [email, setEmail] = useState("");
   const [notice, setNotice] = useState("");
+  const [sending, setSending] = useState(false);
   const supabase = createClient();
 
   useEffect(() => {
@@ -21,31 +24,39 @@ export default function AuthMenu() {
     return () => data.subscription.unsubscribe();
   }, [supabase]);
 
+  useEffect(() => {
+    if (!open) return;
+    const close = (event: KeyboardEvent) => { if (event.key === "Escape") setOpen(false); };
+    document.addEventListener("keydown", close);
+    document.body.style.overflow = "hidden";
+    return () => { document.removeEventListener("keydown", close); document.body.style.overflow = ""; };
+  }, [open]);
+
   async function emailSignIn() {
-    if (!supabase || !email) return;
-    const { error } = await supabase.auth.signInWithOtp({ email, options: { emailRedirectTo: `${window.location.origin}/auth/callback?next=/dashboard` } });
-    setNotice(error ? error.message : "Check your email for a secure sign-in link.");
+    if (!supabase || !email.trim()) { setNotice("Enter your email to continue."); return; }
+    setSending(true);
+    const callback = `${window.location.origin}/auth/callback?next=${encodeURIComponent(redirectTo)}`;
+    const { error } = await supabase.auth.signInWithOtp({ email: email.trim(), options: { emailRedirectTo: callback, shouldCreateUser: true } });
+    setNotice(error ? error.message : "Your sign-in link is on its way. Open it on this device to continue.");
+    setSending(false);
   }
 
-  async function googleSignIn() {
-    if (!supabase) return;
-    const { error } = await supabase.auth.signInWithOAuth({ provider: "google", options: { redirectTo: `${window.location.origin}/auth/callback?next=/dashboard` } });
-    if (error) setNotice(error.message);
-  }
+  if (user) return <div className={styles.account}><Link href="/dashboard">My training</Link><button type="button" onClick={() => void supabase?.auth.signOut()}>Sign out</button></div>;
 
-  if (user) return <div className={styles.accountGroup}><Link href="/dashboard">My journey</Link><button type="button" onClick={() => void supabase?.auth.signOut()}>Sign out</button></div>;
-  return <>
-    <button type="button" className={styles.accountButton} onClick={() => setOpen(true)}>Save progress</button>
-    {open && <div className={styles.authBackdrop} role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setOpen(false); }}>
-      <section className={styles.authCard} role="dialog" aria-modal="true" aria-labelledby="auth-title">
-        <button className={styles.authClose} type="button" aria-label="Close" onClick={() => setOpen(false)}>×</button>
-        <span className={styles.eyebrow}>Cloud profile</span><h2 id="auth-title">Take your chess journey with you.</h2><p>Your guest games stay private on this device until you sign in. Signing in upgrades your profile for cloud sync.</p>
-        <button className={styles.googleButton} type="button" disabled={!isGoogleAuthEnabled} onClick={() => void googleSignIn()}>{isGoogleAuthEnabled ? "Continue with Google" : "Google sign-in · setup needed"}</button>
-        <span className={styles.authDivider}>or use email</span>
-        <label>Email<input type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@example.com" /></label>
-        <button className={styles.emailButton} type="button" onClick={() => void emailSignIn()}>Email me a sign-in link</button>
-        {notice && <small className={styles.authNotice}>{notice}</small>}
+  const dialog = open && typeof document !== "undefined" ? createPortal(
+    <div className={styles.backdrop} role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setOpen(false); }}>
+      <section className={styles.card} role="dialog" aria-modal="true" aria-labelledby="email-auth-title">
+        <button className={styles.close} type="button" aria-label="Close sign in" onClick={() => setOpen(false)}>×</button>
+        <span className={styles.eyebrow}>Free training profile</span>
+        <h2 id="email-auth-title">Keep every lesson.</h2>
+        <p>Enter your email. We’ll send one secure link—no password to remember.</p>
+        <label htmlFor="rivalmind-email">Email address</label>
+        <input id="rivalmind-email" autoFocus type="email" autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void emailSignIn(); }} placeholder="you@example.com" />
+        <button className={styles.continueButton} type="button" disabled={sending} onClick={() => void emailSignIn()}>{sending ? "Sending link…" : "Email me a sign-in link"}</button>
+        <small>{notice || "New here? This creates your account automatically."}</small>
+        <div className={styles.guestLine}><span>Want to look around first?</span><Link href="/play?time=open" onClick={() => setOpen(false)}>Play as guest</Link></div>
       </section>
-    </div>}
-  </>;
+    </div>, document.body) : null;
+
+  return <><button type="button" className={`${styles.trigger} ${prominent ? styles.prominent : ""}`} onClick={() => setOpen(true)}>{triggerLabel}</button>{dialog}</>;
 }

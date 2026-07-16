@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Chess, type Square } from "chess.js";
 import { Chessboard, type Arrow } from "react-chessboard";
+import Link from "next/link";
 import {
   DIFFICULTY_PRESETS,
   explainMove,
@@ -21,44 +22,44 @@ import {
   type PlayerProfile,
   type SearchResult,
   type AssistantSnapshot,
+  type GameTelemetry,
+  type PostGameSummary,
+  type TimeControl,
 } from "@/lib/game-types";
 import GameAssistant from "./GameAssistant";
 import AuthMenu from "./AuthMenu";
 import { loadCloudProfile, syncCompletedGame } from "@/lib/cloud-sync";
+import { adaptiveProgress, advanceProfile, formatClock, formatDuration, learningScore, TIME_CONTROLS } from "@/lib/training-analytics";
+import { useGameClock } from "@/lib/use-game-clock";
 import styles from "./RivalMindGame.module.css";
 
 const PROFILE_KEY = "rivalmind-player-profile-v1";
 const DIFFICULTIES: Difficulty[] = ["easy", "medium", "hard", "adaptive"];
 const COACH_LEVELS: { value: CoachLevel; label: string }[] = [
   { value: "off", label: "Off" },
-  { value: "gentle", label: "Gentle" },
-  { value: "candidates", label: "Candidates" },
-  { value: "best", label: "Best move" },
+  { value: "gentle", label: "Small hint" },
+  { value: "candidates", label: "3 ideas" },
+  { value: "best", label: "Show move" },
 ];
-
-type GameSummary = { result: GameResult; well: string; watch: string };
 
 function resultLabel(result: GameResult) {
   return result === "win" ? "You won" : result === "loss" ? "Rival won" : "Draw";
 }
 
-function createSummary(game: Chess, result: GameResult, hintsThisGame: number): GameSummary {
+function createSummary(game: Chess, result: GameResult, telemetry: GameTelemetry, timeline: AssistantSnapshot[], newMilestones: string[]): PostGameSummary {
   const playerMoves = game.history({ verbose: true }).filter((_, index) => index % 2 === 0);
   const castled = playerMoves.some((move) => move.san === "O-O" || move.san === "O-O-O");
-  const captured = playerMoves.some((move) => Boolean(move.captured));
-  const well = result === "win"
-    ? "You converted the position and found the finish."
-    : castled
-      ? "You gave your king a safer home before taking risks."
-      : captured
-        ? "You stayed alert to tactical chances."
-        : "You kept the game moving with legal, purposeful play.";
-  const watch = result === "loss"
-    ? "Before committing, scan every check, capture, and threat."
-    : hintsThisGame > 3
-      ? "Try naming your own candidate move before opening the coach."
-      : "Keep asking what your opponent wants on the next move.";
-  return { result, well, watch };
+  const decisions = timeline.filter((item) => item.actor === "You");
+  const worst = [...decisions].sort((a, b) => a.delta - b.delta)[0];
+  const headline = result === "win" ? "A strong training win" : result === "draw" ? "A balanced fight" : "A useful game to learn from";
+  const well = telemetry.accuracy >= 85 ? `You matched Stockfish’s first choice on ${telemetry.bestMoveMatches} of ${telemetry.analyzedMoves} analyzed decisions.`
+    : castled ? "You gave your king a safer home before the position became sharp."
+      : "You completed a full game and created a clear review trail.";
+  const watch = worst && worst.severity !== "steady" ? `Revisit ${worst.move}. The evaluation changed by ${Math.abs(worst.delta / 100).toFixed(2)} pawns.`
+    : telemetry.coachUses > 2 ? "Try choosing your own candidate before asking the coach."
+      : "Keep checking your opponent’s forcing moves before you commit.";
+  const keyMoment = worst ? `${worst.move}: ${worst.explanation}` : "Stockfish did not flag a major evaluation swing in the analyzed moves.";
+  return { result, headline, well, watch, keyMoment, telemetry, newMilestones };
 }
 
 function gentleHint(result: SearchResult) {
@@ -77,7 +78,7 @@ function evaluationLabel(score: number | undefined) {
   return `${pawns >= 0 ? "+" : ""}${pawns.toFixed(2)}`;
 }
 
-export default function RivalMindGame() {
+export default function RivalMindGame({ timeControl = "open" }: { timeControl?: TimeControl }) {
   const gameRef = useRef(new Chess());
   const opponentRef = useRef<RivalEngine | null>(null);
   const coachRef = useRef<RivalCoach | null>(null);
@@ -85,6 +86,12 @@ export default function RivalMindGame() {
   const lastAssistantScoreRef = useRef<number | undefined>(undefined);
   const gameVersionRef = useRef(0);
   const gameFinishedRef = useRef(false);
+  const gameStartedAtRef = useRef(Date.now());
+  const playerTurnStartedAtRef = useRef(Date.now());
+  const playerThinkMsRef = useRef(0);
+  const rivalThinkMsRef = useRef(0);
+  const coachTimeMsRef = useRef(0);
+  const sessionStartedRef = useRef(false);
   const [fen, setFen] = useState(() => new Chess().fen());
   const [difficulty, setDifficulty] = useState<Difficulty>("medium");
   const [coachLevel, setCoachLevel] = useState<CoachLevel>("gentle");
@@ -106,8 +113,9 @@ export default function RivalMindGame() {
   const [moveHistory, setMoveHistory] = useState<string[]>([]);
   const [selectedSquare, setSelectedSquare] = useState<string | null>(null);
   const [message, setMessage] = useState("Your move. You are playing White.");
-  const [summary, setSummary] = useState<GameSummary | null>(null);
+  const [summary, setSummary] = useState<PostGameSummary | null>(null);
   const [hintsThisGame, setHintsThisGame] = useState(0);
+  const [sessionElapsedMs, setSessionElapsedMs] = useState(0);
 
   useEffect(() => {
     opponentRef.current = new RivalEngine((status, name) => {
@@ -151,7 +159,27 @@ export default function RivalMindGame() {
     window.localStorage.setItem(PROFILE_KEY, JSON.stringify(profile));
   }, [profile, profileReady]);
 
+  useEffect(() => {
+    if (summary) return;
+    const interval = window.setInterval(() => setSessionElapsedMs(Date.now() - gameStartedAtRef.current), 1000);
+    return () => window.clearInterval(interval);
+  }, [summary]);
+
   const renderGame = useMemo(() => new Chess(fen), [fen]);
+  const gameOver = renderGame.isGameOver() || gameFinishedRef.current;
+  const playerTurn = renderGame.turn() === "w";
+  const clock = useGameClock(timeControl, renderGame.turn(), rivalEngineStatus === "ready" && profileReady && !gameOver, (color) => finishGame(color === "w" ? "loss" : "win"));
+  const resetClock = clock.reset;
+  const statusTone = thinking || coachThinking ? styles.thinkingDot : gameOver ? styles.doneDot : styles.readyDot;
+
+  useEffect(() => {
+    if (sessionStartedRef.current || rivalEngineStatus !== "ready" || !profileReady) return;
+    sessionStartedRef.current = true;
+    const now = Date.now();
+    gameStartedAtRef.current = now;
+    playerTurnStartedAtRef.current = now;
+    resetClock();
+  }, [profileReady, resetClock, rivalEngineStatus]);
 
   const legalTargets = useMemo(() => {
     if (!selectedSquare) return [];
@@ -187,41 +215,30 @@ export default function RivalMindGame() {
     return result;
   }, [lastMove, legalTargets, selectedSquare]);
 
-  function recordResult(result: GameResult) {
-    setProfile((current) => {
-      const recentResults = [...current.recentResults, result].slice(-5);
-      const levelDelta = result === "win" ? 1 : result === "loss" ? -1 : 0;
-      return {
-        ...current,
-        games: current.games + 1,
-        wins: current.wins + (result === "win" ? 1 : 0),
-        losses: current.losses + (result === "loss" ? 1 : 0),
-        draws: current.draws + (result === "draw" ? 1 : 0),
-        adaptiveLevel: Math.max(1, Math.min(10, current.adaptiveLevel + levelDelta)),
-        recentResults,
-      };
-    });
-  }
-
-  function finishGame() {
+  function finishGame(forcedResult?: GameResult) {
     if (gameFinishedRef.current) return;
     gameFinishedRef.current = true;
     const game = gameRef.current;
-    const result: GameResult = game.isCheckmate() ? (game.turn() === "b" ? "win" : "loss") : "draw";
-    const gameSummary = createSummary(game, result, hintsThisGame);
-    recordResult(result);
-    setSummary(gameSummary);
-    setMessage(resultLabel(result));
-    const syncedProfile: PlayerProfile = {
-      ...profile,
-      games: profile.games + 1,
-      wins: profile.wins + (result === "win" ? 1 : 0),
-      losses: profile.losses + (result === "loss" ? 1 : 0),
-      draws: profile.draws + (result === "draw" ? 1 : 0),
-      adaptiveLevel: Math.max(1, Math.min(10, profile.adaptiveLevel + (result === "win" ? 1 : result === "loss" ? -1 : 0))),
-      recentResults: [...profile.recentResults, result].slice(-5),
+    if (forcedResult && game.turn() === "w") playerThinkMsRef.current += Date.now() - playerTurnStartedAtRef.current;
+    const result: GameResult = forcedResult ?? (game.isCheckmate() ? (game.turn() === "b" ? "win" : "loss") : "draw");
+    const learning = learningScore(assistantTimeline);
+    const baseTelemetry = {
+      timeControl,
+      totalTimeMs: Date.now() - gameStartedAtRef.current,
+      playerThinkMs: playerThinkMsRef.current,
+      rivalThinkMs: rivalThinkMsRef.current,
+      coachUses: hintsThisGame,
+      coachTimeMs: coachTimeMsRef.current,
+      ...learning,
+      adaptiveBefore: profile.adaptiveLevel,
     };
-    void syncCompletedGame({ game, difficulty, profile: syncedProfile, summary: gameSummary, timeline: assistantTimeline, assistantEnabled }).catch(() => setMessage(`${resultLabel(result)} · Cloud sync will retry next game.`));
+    const advanced = advanceProfile(profile, result, baseTelemetry);
+    const telemetry: GameTelemetry = { ...baseTelemetry, adaptiveAfter: advanced.profile.adaptiveLevel, trainingPointsEarned: advanced.points };
+    const gameSummary = createSummary(game, result, telemetry, assistantTimeline, advanced.newMilestones);
+    setProfile(advanced.profile);
+    setSummary(gameSummary);
+    setMessage(forcedResult ? `${resultLabel(result)} on time` : resultLabel(result));
+    void syncCompletedGame({ game, difficulty, profile: advanced.profile, summary: gameSummary, timeline: assistantTimeline, assistantEnabled }).catch(() => setMessage(`${resultLabel(result)} · Saved on this device; cloud sync will retry later.`));
   }
 
   async function updateAssistant(position: string, actor: AssistantSnapshot["actor"], move: string | undefined, ply: number, force = false) {
@@ -242,20 +259,24 @@ export default function RivalMindGame() {
 
   async function requestRivalMove(position: string) {
     const version = gameVersionRef.current;
+    const rivalStartedAt = Date.now();
     setThinking(true);
-    setMessage("Rival is thinking…");
+    setMessage("Rival is choosing a move…");
     try {
       const engine = opponentRef.current;
       if (!engine) throw new Error("Engine is still starting");
       const result = await engine.chooseMove(position, difficulty, profile);
-      if (version !== gameVersionRef.current) return;
+      if (version !== gameVersionRef.current || gameFinishedRef.current) return;
+      rivalThinkMsRef.current += Date.now() - rivalStartedAt;
       gameRef.current.move({ from: result.move.from, to: result.move.to, promotion: result.move.promotion ?? "q" });
+      clock.addIncrement("b");
       const rivalSan = gameRef.current.history().at(-1);
       setFen(gameRef.current.fen());
       setMoveHistory(gameRef.current.history());
       setLastMove({ from: result.move.from, to: result.move.to });
       setLastSearch({ actor: "Rival", nodes: result.nodes, depth: result.depth, timeMs: result.timeMs, engine: result.engine });
       setMessage(gameRef.current.isCheck() ? "Your king is in check." : "Your move.");
+      playerTurnStartedAtRef.current = Date.now();
       void updateAssistant(gameRef.current.fen(), "Rival", rivalSan, gameRef.current.history().length);
       if (gameRef.current.isGameOver()) finishGame();
     } catch {
@@ -270,6 +291,8 @@ export default function RivalMindGame() {
     try {
       const move = gameRef.current.move({ from, to, promotion: "q" });
       if (!move) return false;
+      playerThinkMsRef.current += Date.now() - playerTurnStartedAtRef.current;
+      clock.addIncrement("w");
       const nextFen = gameRef.current.fen();
       setFen(nextFen);
       setMoveHistory(gameRef.current.history());
@@ -313,6 +336,7 @@ export default function RivalMindGame() {
       setCoachResult(result);
       setLastSearch({ actor: "Coach", nodes: result.nodes, depth: result.depth, timeMs: result.timeMs, engine: result.engine });
       setHintsThisGame((count) => count + 1);
+      coachTimeMsRef.current += result.timeMs;
       setProfile((current) => ({ ...current, hintUsage: current.hintUsage + 1 }));
     } catch {
       setMessage("The Stockfish coach is unavailable. Reload the page to restart it.");
@@ -335,6 +359,14 @@ export default function RivalMindGame() {
     setSelectedSquare(null);
     setHintsThisGame(0);
     setSummary(null);
+    setSessionElapsedMs(0);
+    gameStartedAtRef.current = Date.now();
+    playerTurnStartedAtRef.current = Date.now();
+    playerThinkMsRef.current = 0;
+    rivalThinkMsRef.current = 0;
+    coachTimeMsRef.current = 0;
+    sessionStartedRef.current = true;
+    clock.reset();
     lastAssistantScoreRef.current = undefined;
     setLatestAssistant(null);
     setAssistantTimeline([]);
@@ -342,18 +374,14 @@ export default function RivalMindGame() {
     if (assistantEnabled) void updateAssistant(gameRef.current.fen(), "Start", undefined, 0);
   }
 
-  const gameOver = renderGame.isGameOver();
-  const playerTurn = renderGame.turn() === "w";
-  const statusTone = thinking || coachThinking ? styles.thinkingDot : gameOver ? styles.doneDot : styles.readyDot;
-
   return (
     <main className={styles.shell}>
       <header className={styles.header}>
-        <a className={styles.brand} href="#top" aria-label="RivalMind home">
+        <Link className={styles.brand} href="/" aria-label="RivalMind home">
           <span className={styles.mark} aria-hidden="true"><i /><i /><i /></span>
           RivalMind
-        </a>
-        <p>Play. Think. Improve.</p>
+        </Link>
+        <p>{TIME_CONTROLS[timeControl].label} · Training board</p>
         <div className={styles.headerStats} aria-label="Player record">
           <span><b>{profile.games}</b> games</span>
           <span><b>{profile.wins}</b> wins</span>
@@ -381,7 +409,7 @@ export default function RivalMindGame() {
             </select>
             <p className={styles.supportingCopy}>
               {difficulty === "adaptive"
-                ? `Tracks your last five results and meets you near level ${profile.adaptiveLevel}.`
+                ? `Level ${profile.adaptiveLevel} changes only when your recent form is clear. ${adaptiveProgress(profile)}% toward a stronger challenge.`
                 : DIFFICULTY_PRESETS[difficulty].description}
             </p>
             <div className={styles.searchSpec}><span>Current target</span><b>{opponentStrengthLabel(difficulty, profile)}</b></div>
@@ -414,7 +442,7 @@ export default function RivalMindGame() {
           <div className={styles.playerStrip}>
             <div><span className={styles.miniAvatar}>SF</span><span><b>Rival</b><small>Stockfish · {difficulty}</small></span></div>
             <div className={styles.stripActions}>
-              <span className={styles.turnPill}>{thinking ? "Thinking" : !playerTurn ? "To move" : "Waiting"}</span>
+              <span className={`${styles.clock} ${!playerTurn && !gameOver ? styles.activeClock : ""}`}>{formatClock(clock.blackMs)}</span>
               <button className={styles.inlineNewGame} type="button" onClick={newGame} aria-label="Start a new game" title="Start a new game">↻</button>
             </div>
           </div>
@@ -446,19 +474,19 @@ export default function RivalMindGame() {
           </div>
           <div className={styles.playerStrip}>
             <div><span className={`${styles.miniAvatar} ${styles.youAvatar}`}>Y</span><span><b>You</b><small>White</small></span></div>
-            <span className={styles.turnPill}>{!thinking && playerTurn && !gameOver ? "Your turn" : "Waiting"}</span>
+            <span className={`${styles.clock} ${playerTurn && !gameOver ? styles.activeClock : ""}`}>{formatClock(clock.whiteMs)}</span>
           </div>
           <div className={styles.thinkingLine} aria-live="polite">
             <span className={statusTone} />
             <b>{message}</b>
-            {lastSearch && <span>{lastSearch.actor} searched {lastSearch.nodes.toLocaleString()} nodes · depth {lastSearch.depth} · {(lastSearch.timeMs / 1000).toFixed(2)}s</span>}
+            <span>{formatDuration(sessionElapsedMs)} in this game{lastSearch ? ` · ${lastSearch.actor} checked ${lastSearch.nodes.toLocaleString()} positions` : ""}</span>
           </div>
         </section>
 
         <aside className={styles.rightRail}>
           <div className={`${styles.panel} ${styles.coachPanel}`}>
             <div className={styles.coachHeading}>
-              <div><span className={styles.eyebrow}>Stockfish coach</span><h2>A second mind, on your side.</h2></div>
+              <div><span className={styles.eyebrow}>Optional coach</span><h2>How much help would you like?</h2></div>
               <span className={styles.coachIcon}>SF</span>
             </div>
             <div className={styles.segmented} aria-label="Coach detail level">
@@ -470,11 +498,11 @@ export default function RivalMindGame() {
             </div>
             <div className={styles.coachBody} aria-live="polite">
               {coachLevel === "off" ? (
-                <div className={styles.emptyCoach}><span>○</span><p>Coach is off. You are reading the board on your own.</p></div>
+                <div className={styles.emptyCoach}><span>○</span><p>No hints. You are solving the position on your own.</p></div>
               ) : coachThinking ? (
-                <div className={styles.emptyCoach}><span className={styles.pulse}>···</span><p>Coach is studying the position.</p></div>
+                <div className={styles.emptyCoach}><span className={styles.pulse}>···</span><p>Checking the best plans in this position…</p></div>
               ) : !coachResult ? (
-                <div className={styles.emptyCoach}><span>↗</span><p>Ask when you want a nudge. The coach never changes Rival’s move.</p></div>
+                <div className={styles.emptyCoach}><span>↗</span><p>Ask for help only when you want it. Your opponent stays separate.</p></div>
               ) : coachLevel === "gentle" ? (
                 <div className={styles.coachAdvice}><span className={styles.adviceLabel}>A gentle nudge</span><p>{gentleHint(coachResult)}</p></div>
               ) : (
@@ -491,15 +519,16 @@ export default function RivalMindGame() {
               )}
             </div>
             <button type="button" className={styles.coachButton} disabled={coachLevel === "off" || coachEngineStatus !== "ready" || thinking || coachThinking || !playerTurn || gameOver} onClick={() => void askCoach()}>
-              {coachEngineStatus === "loading" ? "Starting Stockfish…" : coachEngineStatus === "error" ? "Coach unavailable" : coachThinking ? "Analyzing…" : "Analyze with Stockfish"}<span>↗</span>
+              {coachEngineStatus === "loading" ? "Getting the coach ready…" : coachEngineStatus === "error" ? "Coach unavailable" : coachThinking ? "Looking for ideas…" : "Help me with this position"}<span>↗</span>
             </button>
-            <p className={styles.simCount}>{coachResult ? `${coachResult.nodes.toLocaleString()} nodes · ${coachResult.nps.toLocaleString()} nodes/sec` : `${profile.hintUsage} lifetime hints used`}</p>
+            <p className={styles.simCount}>{coachResult ? `${coachResult.nodes.toLocaleString()} positions checked · ${(coachTimeMsRef.current / 1000).toFixed(1)}s coach time this game` : `${hintsThisGame} coach uses this game · ${profile.hintUsage} all time`}</p>
           </div>
 
           <div className={styles.profilePanel}>
-            <div><span className={styles.eyebrow}>Your practice</span><b>{profile.wins}–{profile.losses}–{profile.draws}</b></div>
-            <div className={styles.levelTrack}><i style={{ width: `${profile.adaptiveLevel * 10}%` }} /></div>
-            <p>Adaptive level {profile.adaptiveLevel} of 10</p>
+            <div><span className={styles.eyebrow}>Training path</span><b>{profile.trainingPoints.toLocaleString()} pts</b></div>
+            <div className={styles.levelTrack}><i style={{ width: `${adaptiveProgress(profile)}%` }} /></div>
+            <p>Adaptive level {profile.adaptiveLevel} · {adaptiveProgress(profile)}% recent-form progress</p>
+            <small>{profile.games < 4 ? `${4 - profile.games} more games before strength can adjust` : `Current rival target: ${opponentStrengthLabel("adaptive", profile)}`}</small>
           </div>
           <button type="button" className={styles.newGameButton} onClick={newGame}>New game <span>↻</span></button>
         </aside>
@@ -526,11 +555,20 @@ export default function RivalMindGame() {
         <div className={styles.modalBackdrop} role="presentation">
           <section className={styles.summaryCard} role="dialog" aria-modal="true" aria-labelledby="game-summary-title">
             <span className={styles.summaryMark}>{summary.result === "win" ? "✓" : summary.result === "loss" ? "×" : "½"}</span>
-            <span className={styles.eyebrow}>Game complete</span>
-            <h2 id="game-summary-title">{resultLabel(summary.result)}</h2>
-            <div><span>What went well</span><p>{summary.well}</p></div>
-            <div><span>Watch next time</span><p>{summary.watch}</p></div>
-            <button type="button" onClick={newGame}>Play another game</button>
+            <span className={styles.eyebrow}>Training complete · +{summary.telemetry.trainingPointsEarned} points</span>
+            <h2 id="game-summary-title">{summary.headline}</h2>
+            <div className={styles.reviewStats}>
+              <span>Time spent<b>{formatDuration(summary.telemetry.totalTimeMs)}</b></span>
+              <span>Your thinking<b>{formatDuration(summary.telemetry.playerThinkMs)}</b></span>
+              <span>Coach used<b>{summary.telemetry.coachUses}× · {formatDuration(summary.telemetry.coachTimeMs)}</b></span>
+              <span>Move quality<b>{summary.telemetry.analyzedMoves ? `${summary.telemetry.accuracy}%` : "Not scored"}</b></span>
+            </div>
+            <div className={styles.reviewLesson}><span>What went well</span><p>{summary.well}</p></div>
+            <div className={styles.reviewLesson}><span>Key moment</span><p>{summary.keyMoment}</p></div>
+            <div className={styles.reviewLesson}><span>Try next game</span><p>{summary.watch}</p></div>
+            <div className={styles.adaptiveReview}><span>Adaptive rival</span><b>Level {summary.telemetry.adaptiveBefore} → {summary.telemetry.adaptiveAfter}</b><p>{summary.telemetry.adaptiveAfter > summary.telemetry.adaptiveBefore ? "Your recent form earned a stronger challenge." : summary.telemetry.adaptiveAfter < summary.telemetry.adaptiveBefore ? "The next game will give you more room to learn." : "One game never changes your level. RivalMind waits for a clear recent pattern."}</p></div>
+            {summary.newMilestones.length > 0 && <div className={styles.milestoneEarned}><span>Milestone unlocked</span><b>{summary.newMilestones.join(" · ")}</b></div>}
+            <div className={styles.reviewActions}><button type="button" onClick={newGame}>Play again</button><Link href="/dashboard">See my training</Link></div>
           </section>
         </div>
       )}

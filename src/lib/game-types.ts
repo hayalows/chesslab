@@ -1,6 +1,7 @@
 export type Difficulty = "easy" | "medium" | "hard" | "adaptive";
 export type CoachLevel = "off" | "gentle" | "candidates" | "best";
 export type GameResult = "win" | "loss" | "draw";
+export type TimeControl = "open" | "rapid10" | "steady15";
 
 export type SearchMove = {
   from: string;
@@ -48,6 +49,37 @@ export type PlayerProfile = {
   hintUsage: number;
   adaptiveLevel: number;
   recentResults: GameResult[];
+  trainingPoints: number;
+  trainingMinutes: number;
+  currentStreak: number;
+  bestStreak: number;
+  lastLevelChangeGame: number;
+  milestones: string[];
+};
+
+export type GameTelemetry = {
+  timeControl: TimeControl;
+  totalTimeMs: number;
+  playerThinkMs: number;
+  rivalThinkMs: number;
+  coachUses: number;
+  coachTimeMs: number;
+  accuracy: number;
+  bestMoveMatches: number;
+  analyzedMoves: number;
+  adaptiveBefore: number;
+  adaptiveAfter: number;
+  trainingPointsEarned: number;
+};
+
+export type PostGameSummary = {
+  result: GameResult;
+  headline: string;
+  well: string;
+  watch: string;
+  keyMoment: string;
+  telemetry: GameTelemetry;
+  newMilestones: string[];
 };
 
 export const DEFAULT_PROFILE: PlayerProfile = {
@@ -58,4 +90,10 @@ export const DEFAULT_PROFILE: PlayerProfile = {
   hintUsage: 0,
   adaptiveLevel: 4,
   recentResults: [],
+  trainingPoints: 0,
+  trainingMinutes: 0,
+  currentStreak: 0,
+  bestStreak: 0,
+  lastLevelChangeGame: 0,
+  milestones: [],
 };

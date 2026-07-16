@@ -40,18 +40,16 @@ type BridgeMessage =
 export type EngineStatusListener = (status: EngineStatus, name: string) => void;
 
 export const DIFFICULTY_PRESETS: Record<Exclude<Difficulty, "adaptive">, { elo: number; movetimeMs: number; description: string }> = {
-  easy: { elo: 1350, movetimeMs: 140, description: "A patient club player who still leaves chances." },
-  medium: { elo: 1700, movetimeMs: 280, description: "A confident tournament player with fewer loose moves." },
-  hard: { elo: 2200, movetimeMs: 650, description: "Expert strength with deeper, more precise calculation." },
+  easy: { elo: 1350, movetimeMs: 140, description: "More room to spot ideas and recover from mistakes." },
+  medium: { elo: 1600, movetimeMs: 300, description: "A steady challenge that punishes loose pieces." },
+  hard: { elo: 2100, movetimeMs: 700, description: "A precise opponent for experienced players." },
 };
 
 function adaptiveSettings(profile: PlayerProfile): StockfishSettings {
-  const wins = profile.recentResults.filter((result) => result === "win").length;
-  const losses = profile.recentResults.filter((result) => result === "loss").length;
-  const adjustedLevel = Math.max(1, Math.min(10, profile.adaptiveLevel + Math.sign(wins - losses)));
+  const adjustedLevel = Math.max(1, Math.min(10, profile.adaptiveLevel));
   return {
-    elo: 1350 + (adjustedLevel - 1) * 130,
-    movetimeMs: 160 + adjustedLevel * 45,
+    elo: 1350 + (adjustedLevel - 1) * 120,
+    movetimeMs: 120 + adjustedLevel * 55,
     multiPv: 1,
   };
 }

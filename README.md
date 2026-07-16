@@ -24,7 +24,11 @@ Open [http://localhost:3000](http://localhost:3000).
 - A separate, toggleable Game Assistant that updates after every move
 - Stockfish-derived position health, outlook, momentum, alternatives, tactical radar, confidence, and mistake timeline
 - Expandable evidence cards with principal variations, depth, time, and real node counts
-- Supabase email/Google auth plumbing, guest upgrades, cross-device cloud sync, and a player journey dashboard
+- Supabase email sign-in, guest upgrades, cross-device cloud sync, and a player journey dashboard
+- A real home and session setup flow with open practice, 10-minute, and 15+10 games
+- Post-game training reviews with total time, active thinking time, coach use, move quality, key moments, points, and milestones
+- A transparent adaptive ladder that waits for clear multi-game form before changing Stockfish strength
+- Learning analytics for training time, coach independence, streaks, move quality, and playing style after 20 games
 
 Every computer reply and coach analysis now runs through the threaded [`lichess-org/stockfish.wasm`](https://github.com/lichess-org/stockfish.wasm) engine using the UCI protocol. Difficulty uses Stockfish's `UCI_LimitStrength` and `UCI_Elo` controls plus a bounded search time; coaching runs at full strength with MultiPV candidate lines. RivalMind shows real nodes, depth, elapsed search time, evaluation, and engine readiness rather than simulated telemetry.
 
@@ -36,6 +40,6 @@ Stockfish is the only analysis and opponent engine. RivalMind converts its score
 
 ## Cloud setup
 
-Copy `.env.example` to `.env.local` and provide a Supabase project URL and publishable key. Never expose a secret or service-role key. Apply migrations in `supabase/migrations`, then configure the Supabase Auth URL allow list with your local and production `/auth/callback` URLs. Google sign-in additionally requires Google provider credentials in Supabase and `NEXT_PUBLIC_GOOGLE_AUTH_ENABLED=true`; email magic-link sign-in works through the same callback.
+Copy `.env.example` to `.env.local` and provide a Supabase project URL and publishable key. Never expose a secret or service-role key. Apply migrations in `supabase/migrations`, then configure the Supabase Auth URL allow list with your local and production `/auth/callback` URLs. RivalMind uses email magic links only.
 
 See [docs/CLOUD.md](docs/CLOUD.md) for the table model, RLS contract, and client API flows.
