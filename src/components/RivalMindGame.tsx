@@ -30,6 +30,7 @@ import {
   type PostGameSummary,
   type TimeControl,
 } from "@/lib/game-types";
+import { isPlayerTurn } from "@/lib/game-session";
 import GameAssistant from "./GameAssistant";
 import AuthMenu from "./AuthMenu";
 import { loadCloudProfile, syncCompletedGame } from "@/lib/cloud-sync";
@@ -246,7 +247,7 @@ export default function RivalMindGame({ timeControl: initialTimeControl = "open"
 
   const renderGame = useMemo(() => new Chess(fen), [fen]);
   const gameOver = renderGame.isGameOver() || gameFinished;
-  const playerTurn = renderGame.turn() === playerColor;
+  const playerTurn = isPlayerTurn(renderGame.turn(), playerColor);
   const clock = useGameClock(timeControl, renderGame.turn(), gameActive && rivalEngineStatus === "ready" && profileReady && !gameOver, (color) => finishGame(color === playerColor ? "loss" : "win"));
   const resetClock = clock.reset;
   const rivalColor: Color = playerColor === "w" ? "b" : "w";
@@ -410,7 +411,7 @@ export default function RivalMindGame({ timeControl: initialTimeControl = "open"
   }
 
   async function askCoach() {
-    if (coachLevel === "off" || thinking || coachThinking || gameRef.current.turn() !== "w" || gameRef.current.isGameOver()) return;
+    if (coachLevel === "off" || thinking || coachThinking || !isPlayerTurn(gameRef.current.turn(), playerColor) || gameRef.current.isGameOver()) return;
     setCoachThinking(true);
     setCoachResult(null);
     try {
