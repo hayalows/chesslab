@@ -211,9 +211,20 @@ export default function RivalMindGame() {
   }
 
   function handleSquareClick(square: string) {
+    if (selectedSquare === square) {
+      setSelectedSquare(null);
+      setMessage("Selection cleared. Choose a white piece.");
+      return;
+    }
     if (selectedSquare && makePlayerMove(selectedSquare, square)) return;
     const piece = gameRef.current.get(square as Square);
-    setSelectedSquare(piece?.color === "w" ? square : null);
+    if (piece?.color === "w") {
+      setSelectedSquare(square);
+      setMessage(`Selected ${square}. Choose a highlighted square.`);
+    } else {
+      setSelectedSquare(null);
+      setMessage("Choose one of your white pieces first.");
+    }
   }
 
   async function askCoach() {
@@ -305,11 +316,31 @@ export default function RivalMindGame() {
         </aside>
 
         <section className={styles.boardStage} aria-label="Chess game">
+          <div className={styles.mobileGameControls} aria-label="Quick game controls">
+            <label htmlFor="mobile-difficulty">
+              <span>Rival strength</span>
+              <select id="mobile-difficulty" value={difficulty} onChange={(event) => setDifficulty(event.target.value as Difficulty)}>
+                {DIFFICULTIES.map((level) => <option key={level} value={level}>{level[0].toUpperCase() + level.slice(1)}</option>)}
+              </select>
+            </label>
+            <button type="button" disabled={coachLevel === "off" || thinking || coachThinking || !playerTurn || gameOver} onClick={() => void askCoach()}>
+              {coachThinking ? "Thinking…" : "Ask coach"}
+            </button>
+          </div>
           <div className={styles.playerStrip}>
             <div><span className={styles.miniAvatar}>RM</span><span><b>Rival</b><small>{difficulty} · Black</small></span></div>
-            <span className={styles.turnPill}>{thinking ? "Thinking" : !playerTurn ? "To move" : "Waiting"}</span>
+            <div className={styles.stripActions}>
+              <span className={styles.turnPill}>{thinking ? "Thinking" : !playerTurn ? "To move" : "Waiting"}</span>
+              <button className={styles.inlineNewGame} type="button" onClick={newGame} aria-label="Start a new game" title="Start a new game">↻</button>
+            </div>
           </div>
           <div className={styles.boardFrame}>
+            {moveHistory.length === 0 && !thinking && (
+              <div className={styles.startGuide} aria-hidden="true">
+                <b>You are White</b>
+                <span>Drag a piece, or tap it then tap a highlighted square.</span>
+              </div>
+            )}
             <Chessboard options={{
               id: "rivalmind-board",
               position: fen,
@@ -348,7 +379,7 @@ export default function RivalMindGame() {
             </div>
             <div className={styles.segmented} aria-label="Coach detail level">
               {COACH_LEVELS.map((level) => (
-                <button key={level.value} className={coachLevel === level.value ? styles.activeSegment : ""} onClick={() => { setCoachLevel(level.value); setCoachResult(null); }}>
+                <button type="button" aria-pressed={coachLevel === level.value} key={level.value} className={coachLevel === level.value ? styles.activeSegment : ""} onClick={() => { setCoachLevel(level.value); setCoachResult(null); }}>
                   {level.label}
                 </button>
               ))}
@@ -374,7 +405,7 @@ export default function RivalMindGame() {
                 </div>
               )}
             </div>
-            <button className={styles.coachButton} disabled={coachLevel === "off" || thinking || coachThinking || !playerTurn || gameOver} onClick={() => void askCoach()}>
+            <button type="button" className={styles.coachButton} disabled={coachLevel === "off" || thinking || coachThinking || !playerTurn || gameOver} onClick={() => void askCoach()}>
               {coachThinking ? "Considering…" : "Ask coach"}<span>↗</span>
             </button>
             <p className={styles.simCount}>{coachResult ? `${coachResult.simulations.toLocaleString()} positions considered` : `${profile.hintUsage} lifetime hints used`}</p>
@@ -385,7 +416,7 @@ export default function RivalMindGame() {
             <div className={styles.levelTrack}><i style={{ width: `${profile.adaptiveLevel * 10}%` }} /></div>
             <p>Adaptive level {profile.adaptiveLevel} of 10</p>
           </div>
-          <button className={styles.newGameButton} onClick={newGame}>New game <span>↻</span></button>
+          <button type="button" className={styles.newGameButton} onClick={newGame}>New game <span>↻</span></button>
         </aside>
       </section>
 
@@ -399,7 +430,7 @@ export default function RivalMindGame() {
             <h2 id="game-summary-title">{resultLabel(summary.result)}</h2>
             <div><span>What went well</span><p>{summary.well}</p></div>
             <div><span>Watch next time</span><p>{summary.watch}</p></div>
-            <button onClick={newGame}>Play another game</button>
+            <button type="button" onClick={newGame}>Play another game</button>
           </section>
         </div>
       )}
