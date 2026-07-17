@@ -25,6 +25,10 @@ next-env.d.ts
 /public/stockfish/stockfish.wasm
 /public/stockfish/stockfish.worker.js
 /public/stockfish/Copying.txt
+/public/stockfish/sf_18_smallnet.js
+/public/stockfish/sf_18_smallnet.wasm
+/public/stockfish/nn-4ca89e4b3abf.nnue
+/public/stockfish/Stockfish-Web-License.txt
 
 # training data (downloaded by the model pipeline)
 /data/raw/

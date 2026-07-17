@@ -13,6 +13,7 @@
     "train:human-plan": "node scripts/train-human-plan-model.mjs"
   },
   "dependencies": {
+    "@lichess-org/stockfish-web": "0.4.2",
     "@supabase/ssr": "0.12.3",
     "@supabase/supabase-js": "2.110.6",
     "@usenavii/react": "^0.8.1",

@@ -65,7 +65,7 @@ function InteractiveBoard() {
         id: "rivalmind-home-board",
         position: fen,
         showNotation: true,
-        animationDurationInMs: 180,
+        animationDurationInMs: 220,
         allowDragging: renderGame.turn() === "w" && !renderGame.isGameOver(),
         canDragPiece: ({ square }) => Boolean(square && renderGame.get(square as Square)?.color === "w"),
         onPieceDrop: ({ sourceSquare, targetSquare }) => Boolean(targetSquare && move(sourceSquare, targetSquare)),
@@ -100,6 +100,8 @@ export default function LandingPage() {
       <InteractiveBoard />
     </section>
 
+    <section className={styles.proofStrip} aria-label="RivalMind foundations"><span><b>Stockfish 18</b> for every engine decision</span><span><b>Legal moves only</b> with chess.js rules</span><span><b>Guest first</b> with optional cloud sync</span><span><b>Human learning</b> from plain English reviews</span></section>
+
     <section className={styles.pathSection} id="choose">
       <div className={styles.sectionIntro}><h2>What do you want to do?</h2><p>Choose the experience first. You can set the color, clock, and Rival strength next.</p></div>
       <div className={styles.pathGrid}>
@@ -119,12 +121,12 @@ export default function LandingPage() {
     </section>
 
     <section className={styles.learningSection}>
-      <div className={styles.learningCopy}><h2>One board. Four clear layers.</h2><p>RivalMind keeps the game simple and puts deeper detail behind choices you control.</p><Link href="/play?mode=training&time=open">See it in a training game</Link></div>
+      <div className={styles.learningCopy}><h2>Play first. Understand more when you want to.</h2><p>RivalMind keeps the board focused and puts deeper detail behind choices you control.</p><Link href="/play?mode=training&time=open">See it in a training game</Link></div>
       <div className={styles.learningList}>
-        <article><span>01</span><div><h3>Play</h3><p>Legal moves, a responsive board, and a Stockfish Rival at the strength you choose.</p></div></article>
-        <article><span>02</span><div><h3>Ask</h3><p>The optional coach starts with a clue and reveals more only when you request it.</p></div></article>
-        <article><span>03</span><div><h3>Understand</h3><p>Plain English explains evaluation changes, threats, candidate moves, and forced mates.</p></div></article>
-        <article><span>04</span><div><h3>Remember</h3><p>Your independent decisions shape adaptive strength, practice positions, and progress.</p></div></article>
+        <article><span>BOARD</span><div><h3>Play naturally</h3><p>Legal moves, smooth piece motion, captured material, and a Stockfish Rival at the strength you choose.</p></div></article>
+        <article><span>COACH</span><div><h3>Ask only when needed</h3><p>The time-aware coach starts with a clue and reveals verified Stockfish moves only when you request them.</p></div></article>
+        <article><span>STORY</span><div><h3>Understand the swing</h3><p>Plain English explains evaluation changes, threats, candidate moves, and forced mates.</p></div></article>
+        <article><span>PROFILE</span><div><h3>Become more independent</h3><p>Your unassisted decisions shape adaptive strength, practice positions, and progress.</p></div></article>
       </div>
     </section>
 

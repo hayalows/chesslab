@@ -31,7 +31,7 @@ import {
   type SessionMode,
   type CustomTimeSettings,
 } from "@/lib/game-types";
-import { canRevealCoachStep, coachCacheMode, isPlayerTurn } from "@/lib/game-session";
+import { canRevealCoachStep, coachSearchPlan, isPlayerTurn } from "@/lib/game-session";
 import GameAssistant from "./GameAssistant";
 import AuthMenu from "./AuthMenu";
 import { loadCloudProfile, syncCompletedGame } from "@/lib/cloud-sync";
@@ -58,6 +58,40 @@ const COACH_LEVELS: { value: CoachLevel; label: string }[] = [
   { value: "candidates", label: "3 ideas" },
   { value: "best", label: "Show move" },
 ];
+const CAPTURE_SYMBOLS = {
+  w: { p: "♙", n: "♘", b: "♗", r: "♖", q: "♕" },
+  b: { p: "♟", n: "♞", b: "♝", r: "♜", q: "♛" },
+} as const;
+const PIECE_VALUES = { p: 1, n: 3, b: 3, r: 5, q: 9 } as const;
+const CAPTURE_ORDER = { q: 0, r: 1, b: 2, n: 3, p: 4 } as const;
+
+function capturedMaterial(history: string[]) {
+  const game = new Chess();
+  for (const san of history) {
+    try { game.move(san); } catch { break; }
+  }
+  const captured = { w: [] as (keyof typeof PIECE_VALUES)[], b: [] as (keyof typeof PIECE_VALUES)[] };
+  for (const move of game.history({ verbose: true })) {
+    if (move.captured && move.captured !== "k") captured[move.color].push(move.captured);
+  }
+  captured.w.sort((a, b) => CAPTURE_ORDER[a] - CAPTURE_ORDER[b]);
+  captured.b.sort((a, b) => CAPTURE_ORDER[a] - CAPTURE_ORDER[b]);
+  const score = (color: PlayerColor) => captured[color].reduce((sum, piece) => sum + PIECE_VALUES[piece], 0);
+  return { captured, score: { w: score("w"), b: score("b") } };
+}
+
+function CapturedTray({ by, material }: { by: PlayerColor; material: ReturnType<typeof capturedMaterial> }) {
+  const pieces = material.captured[by];
+  const victim = by === "w" ? "b" : "w";
+  const advantage = material.score[by] - material.score[by === "w" ? "b" : "w"];
+  return (
+    <span className={styles.capturedTray} aria-label={pieces.length ? `${pieces.length} captured pieces${advantage > 0 ? `, ahead by ${advantage}` : ""}` : "No captured pieces"}>
+      <span>Captured</span>
+      <i>{pieces.length ? pieces.map((piece, index) => <b key={`${piece}-${index}`}>{CAPTURE_SYMBOLS[victim][piece]}</b>) : "No captures"}</i>
+      {advantage > 0 && <em>+{advantage}</em>}
+    </span>
+  );
+}
 
 function resultLabel(result: GameResult) {
   return result === "win" ? "You won" : result === "loss" ? "Rival won" : "Draw";
@@ -361,8 +395,20 @@ export default function RivalMindGame({ timeControl: initialTimeControl = "open"
         background: "radial-gradient(circle, rgba(38, 52, 90, .28) 0 15%, transparent 17%)",
       };
     }
+    for (const [index, arrow] of arrows.entries()) {
+      result[arrow.startSquare] = {
+        ...result[arrow.startSquare],
+        boxShadow: `inset 0 0 0 ${index === 0 ? 4 : 3}px ${index === 0 ? "rgba(50,70,121,.72)" : "rgba(50,70,121,.38)"}`,
+      };
+      result[arrow.endSquare] = {
+        ...result[arrow.endSquare],
+        background: index === 0
+          ? "radial-gradient(circle, rgba(62,85,143,.38) 0 30%, rgba(228,234,247,.35) 32% 100%)"
+          : "radial-gradient(circle, rgba(62,85,143,.24) 0 26%, transparent 28%)",
+      };
+    }
     return result;
-  }, [lastMove, legalTargets, selectedSquare]);
+  }, [arrows, lastMove, legalTargets, selectedSquare]);
 
   async function updateAssistant(position: string, actor: AssistantSnapshot["actor"], move: string | undefined, ply: number, force = false, analysisPlayerColor = playerColor) {
     if (!assistantEnabled && !force) return;
@@ -391,10 +437,20 @@ export default function RivalMindGame({ timeControl: initialTimeControl = "open"
     try {
       const engine = opponentRef.current;
       if (!engine) throw new Error("Engine is still starting");
-      const result = await engine.chooseMove(position, activeDifficulty, profile);
+      const incrementMs = timeControl === "custom" ? customIncrement * 1_000 : TIME_CONTROLS[timeControl].incrementMs;
+      const rivalColor = activePlayerColor === "w" ? "b" : "w";
+      const result = await engine.chooseMove(position, activeDifficulty, profile, {
+        moves: gameRef.current.history({ verbose: true }).map((move) => `${move.from}${move.to}${move.promotion ?? ""}`),
+        movingColor: rivalColor,
+        clock: {
+          whiteMs: clock.whiteMs,
+          blackMs: clock.blackMs,
+          whiteIncrementMs: incrementMs,
+          blackIncrementMs: incrementMs,
+        },
+      });
       if (version !== gameVersionRef.current || gameFinishedRef.current) return;
       rivalThinkMsRef.current += currentTimeMs() - rivalStartedAt;
-      const rivalColor = activePlayerColor === "w" ? "b" : "w";
       gameRef.current.move({ from: result.move.from, to: result.move.to, promotion: result.move.promotion ?? "q" });
       clock.addIncrement(rivalColor);
       const rivalSan = gameRef.current.history().at(-1);
@@ -490,8 +546,9 @@ export default function RivalMindGame({ timeControl: initialTimeControl = "open"
     const version = gameVersionRef.current;
     const request = ++coachRequestRef.current;
     const position = gameRef.current.fen();
+    const plan = coachSearchPlan(coachLevel, playerClock);
     const idea = playerIdea.trim() || undefined;
-    const cached = assistantRef.current?.peek(position, coachCacheMode(coachLevel));
+    const cached = assistantRef.current?.peek(position, plan.mode, plan.options);
     const registerConsultation = (result: SearchResult) => {
       const visibleCandidates = coachLevel === "gentle" ? [] : result.candidates.slice(0, coachLevel === "best" ? 1 : 3);
       const mates = coachLevel === "gentle" ? [] : immediateCheckmates(position);
@@ -511,7 +568,7 @@ export default function RivalMindGame({ timeControl: initialTimeControl = "open"
     setHintsThisGame((count) => count + 1);
     setProfile((current) => ({ ...current, hintUsage: current.hintUsage + 1 }));
     try {
-      const result = await assistantRef.current?.analyze(position, "deep");
+      const result = await assistantRef.current?.analyze(position, plan.mode, plan.options);
       if (!result || version !== gameVersionRef.current || request !== coachRequestRef.current || gameRef.current.fen() !== position) return;
       setCoachResult(result);
       registerConsultation(result);
@@ -667,6 +724,8 @@ export default function RivalMindGame({ timeControl: initialTimeControl = "open"
   const trainingPlan = weeklyPlan(profile, reviewPositionCount);
   const summaryCalibration = summary ? confidenceCalibration(summary.decisions) : null;
   const hasResumableGame = gameActive && !gameOver && !summary;
+  const material = useMemo(() => capturedMaterial(moveHistory), [moveHistory]);
+  const activeCoachPlan = useMemo(() => coachSearchPlan(coachLevel, playerClock), [coachLevel, playerClock]);
 
   return (
     <main className={`${styles.shell} ${sessionMode === "training" ? "" : styles.focusedMode}`}>
@@ -697,11 +756,11 @@ export default function RivalMindGame({ timeControl: initialTimeControl = "open"
             </div>
             <div className={styles.engineStatus} data-status={rivalEngineStatus}>
               <span className={styles.engineGlyph}>SF</span>
-              <span><b>{engineName}</b><small>{rivalEngineStatus === "ready" ? "Engine online · every reply verified" : rivalEngineStatus === "error" ? "Engine unavailable · reload to retry" : "Loading the chess engine…"}</small></span>
+              <span><b>{engineName}</b><small>{rivalEngineStatus === "ready" ? "Stockfish 18 ready · every reply verified" : rivalEngineStatus === "error" ? "Engine unavailable · reload to retry" : "Loading Stockfish 18…"}</small></span>
             </div>
             <label className={styles.fieldLabel} htmlFor="difficulty">Difficulty</label>
             <select id="difficulty" value={difficulty} disabled={gameActive} onChange={(event) => setDifficulty(event.target.value as Difficulty)}>
-              {DIFFICULTIES.map((level) => <option key={level} value={level}>{level[0].toUpperCase() + level.slice(1)}{level === "adaptive" ? "" : ` · ${DIFFICULTY_PRESETS[level].elo}`}</option>)}
+              {DIFFICULTIES.map((level) => <option key={level} value={level}>{level[0].toUpperCase() + level.slice(1)}{level === "adaptive" ? "" : DIFFICULTY_PRESETS[level].elo === null ? " · Maximum" : ` · ${DIFFICULTY_PRESETS[level].elo}`}</option>)}
             </select>
             <p className={styles.supportingCopy}>
               {difficulty === "adaptive"
@@ -709,6 +768,7 @@ export default function RivalMindGame({ timeControl: initialTimeControl = "open"
                 : DIFFICULTY_PRESETS[difficulty].description}
             </p>
             <div className={styles.searchSpec}><span>Current target</span><b>{opponentStrengthLabel(difficulty, profile)}</b></div>
+            <details className={styles.strengthHelp}><summary>How Rival strength works</summary><p>Rated levels use Stockfish&apos;s limited-strength setting. Master removes the Elo limit. Search time shortens only when the Rival&apos;s own clock is low.</p></details>
           </div>
 
           <div className={`${styles.panel} ${styles.movesPanel}`}>
@@ -736,7 +796,7 @@ export default function RivalMindGame({ timeControl: initialTimeControl = "open"
             </button>
           </div>
           <div className={styles.playerStrip}>
-            <div><span className={styles.miniAvatar}>SF</span><span><b>Rival</b><small>{rivalColor === "w" ? "White" : "Black"} · Stockfish {difficulty}</small></span></div>
+            <div><span className={styles.miniAvatar}>SF</span><span><b>Rival</b><small>{rivalColor === "w" ? "White" : "Black"} · Stockfish {difficulty}</small><CapturedTray by={rivalColor} material={material} /></span></div>
             <div className={styles.stripActions}>
               <span className={`${styles.clock} ${!playerTurn && !gameOver ? styles.activeClock : ""}`}>{formatClock(rivalClock)}</span>
               <button className={styles.inlineNewGame} type="button" onClick={openGameSetup} aria-label="Set up a new game" title="Set up a new game">↻</button>
@@ -754,7 +814,7 @@ export default function RivalMindGame({ timeControl: initialTimeControl = "open"
               position: fen,
               boardOrientation: playerColor === "w" ? "white" : "black",
               showNotation: true,
-              animationDurationInMs: 180,
+              animationDurationInMs: 220,
               allowDragging: !thinking && !coachThinking && playerTurn && !gameOver,
               canDragPiece: ({ square }) => Boolean(square && renderGame.get(square as Square)?.color === playerColor),
               onPieceDrop: ({ sourceSquare, targetSquare }) => Boolean(targetSquare && makePlayerMove(sourceSquare, targetSquare)),
@@ -769,7 +829,7 @@ export default function RivalMindGame({ timeControl: initialTimeControl = "open"
             }} />
           </div>
           <div className={styles.playerStrip}>
-            <div><span className={styles.naviiMini}><Navii seed={profile.avatarSeed} size={29} title={profile.displayName} background="ring" /></span><span><b>{profile.displayName}</b><small>{playerColor === "w" ? "White" : "Black"}</small></span></div>
+            <div><span className={styles.naviiMini}><Navii seed={profile.avatarSeed} size={29} title={profile.displayName} background="ring" /></span><span><b>{profile.displayName}</b><small>{playerColor === "w" ? "White" : "Black"}</small><CapturedTray by={playerColor} material={material} /></span></div>
             <span className={`${styles.clock} ${playerTurn && !gameOver ? styles.activeClock : ""}`}>{formatClock(playerClock)}</span>
           </div>
           <div className={styles.thinkingLine} aria-live="polite">
@@ -784,7 +844,7 @@ export default function RivalMindGame({ timeControl: initialTimeControl = "open"
         </section>
 
         <aside className={styles.rightRail}>
-          {sessionMode !== "training" && <div className={`${styles.panel} ${styles.focusedNotice}`}><span className={styles.eyebrow}>{sessionMode === "cup" ? `Tournament · Round ${cupRound}` : "Focused game"}</span><h2>Live help is off.</h2><p>Play from your own ideas. RivalMind is quietly recording the game so your review is ready when it ends.</p><button type="button" onClick={openGameSetup}>Change mode</button></div>}
+          {sessionMode !== "training" && <div className={`${styles.panel} ${styles.focusedNotice}`}><span className={styles.eyebrow}>{sessionMode === "cup" ? `Tournament round ${cupRound}` : "Focused game"}</span><h2>{sessionMode === "cup" ? `Round ${cupRound} of 3` : "Live help is off."}</h2><p>{sessionMode === "cup" ? `Score: ${cupScore} points. Win for 3, draw for 1. Rival strength rises after each round.` : "Play from your own ideas. RivalMind records the game so your review is ready when it ends."}</p>{sessionMode === "cup" && <div className={styles.cupProgress} aria-label={`Tournament round ${cupRound} of 3`}>{[1,2,3].map((round)=><span key={round} data-state={round < cupRound ? "done" : round === cupRound ? "current" : "next"}><i>{round}</i><b>{round === cupRound ? "Playing" : round < cupRound ? "Done" : "Next"}</b></span>)}</div>}<button type="button" onClick={openGameSetup}>Change mode</button></div>}
           <div className={`${styles.panel} ${styles.coachPanel}`}>
             <div className={styles.coachHeading}>
               <div><span className={styles.eyebrow}>Optional coach</span><h2>How much help would you like?</h2></div>
@@ -797,6 +857,8 @@ export default function RivalMindGame({ timeControl: initialTimeControl = "open"
                 </button>
               ))}
             </div>
+            {coachLevel !== "off" && <div className={styles.coachPace} data-pressure={activeCoachPlan.pressure}><b>{activeCoachPlan.label}</b><span>{activeCoachPlan.detail}</span></div>}
+            {coachLevel !== "off" && <details className={styles.searchDirector}><summary>How the fast coach works</summary><p>RivalMind pre-checks the current position, reuses completed analysis, and reduces the search budget under time pressure. Every move shown still comes from a completed Stockfish 18 line.</p></details>}
             {coachLevel !== "off" && !coachResult && <label className={styles.thinkFirst}><span>Your idea first <i>optional</i></span><input value={playerIdea} onChange={(event) => setPlayerIdea(event.target.value)} placeholder="For example, Nf3" maxLength={12} /><small>RivalMind compares your idea with Stockfish instead of replacing your thinking.</small></label>}
             <div className={styles.coachBody} aria-live="polite">
               {coachLevel === "off" ? (
@@ -837,7 +899,7 @@ export default function RivalMindGame({ timeControl: initialTimeControl = "open"
             <button type="button" className={styles.coachButton} disabled={coachLevel === "off" || coachEngineStatus !== "ready" || thinking || coachThinking || !playerTurn || gameOver} onClick={() => void askCoach()}>
               {coachEngineStatus === "loading" ? "Getting the coach ready…" : coachEngineStatus === "error" ? "Coach unavailable" : coachThinking ? "Refining the answer…" : "Help me with this position"}<span>↗</span>
             </button>
-            <p className={styles.simCount}>{coachResult ? `${coachResult.nodes.toLocaleString()} positions checked · ${(coachElapsedMs / 1000).toFixed(1)}s coach time this game` : `${hintsThisGame} coach uses this game · ${profile.hintUsage} all time`}</p>
+            <p className={styles.simCount}>{coachResult ? `${coachResult.nodes.toLocaleString()} positions checked · ${(coachElapsedMs / 1000).toFixed(1)}s engine time` : `${hintsThisGame} coach requests this game · ${profile.hintUsage} all time`}</p>
           </div>
 
           <div className={styles.profilePanel}>
@@ -870,7 +932,7 @@ export default function RivalMindGame({ timeControl: initialTimeControl = "open"
         />
       </div>
 
-      <footer><span>RivalMind · Guest-first with secure cloud sync.</span><span><a href="https://github.com/lichess-org/stockfish.wasm" target="_blank" rel="noreferrer">Stockfish WASM</a> engine · legal moves by chess.js</span></footer>
+      <footer><span>RivalMind · Guest-first with secure cloud sync.</span><span><a href="https://github.com/lichess-org/stockfish-web" target="_blank" rel="noreferrer">Stockfish 18 WebAssembly</a> · legal moves by chess.js</span></footer>
 
       {setupOpen && (
         <div className={styles.modalBackdrop} role="presentation" onMouseDown={(event) => { if (hasResumableGame && event.target === event.currentTarget) closeGameSetup(); }}>
@@ -887,7 +949,7 @@ export default function RivalMindGame({ timeControl: initialTimeControl = "open"
             <fieldset className={styles.setupSection}><legend>Your side</legend><div className={styles.choiceGrid}>{SIDE_OPTIONS.map((option) => <button type="button" key={option.value} aria-pressed={sideChoice === option.value} onClick={() => setSideChoice(option.value)}><b>{option.label}</b><span>{option.detail}</span></button>)}</div></fieldset>
             <fieldset className={styles.setupSection}><legend>Time</legend><div className={styles.timeGrid}>{TIME_OPTIONS.map((option) => <button type="button" key={option} aria-pressed={timeControl === option} onClick={() => setTimeControl(option)}><b>{TIME_CONTROLS[option].short}</b><span>{TIME_CONTROLS[option].label}</span></button>)}</div></fieldset>
             {timeControl === "custom" && <div className={styles.customTimeFields}><label htmlFor="custom-minutes"><span>Minutes per player</span><input id="custom-minutes" type="number" min="1" max="180" value={customMinutes} onChange={(event) => setCustomMinutes(Math.max(1, Math.min(180, Number(event.target.value) || 1)))} /></label><label htmlFor="custom-increment"><span>Increment after each move</span><div><input id="custom-increment" type="number" min="0" max="60" value={customIncrement} onChange={(event) => setCustomIncrement(Math.max(0, Math.min(60, Number(event.target.value) || 0)))} /><small>seconds</small></div></label></div>}
-            <label className={styles.setupField} htmlFor="setup-difficulty"><span>Rival strength</span><select id="setup-difficulty" value={difficulty} onChange={(event) => setDifficulty(event.target.value as Difficulty)}>{DIFFICULTIES.map((level) => <option key={level} value={level}>{level === "adaptive" ? `Adaptive · current level ${profile.adaptiveLevel}` : `${level[0].toUpperCase() + level.slice(1)} · ${DIFFICULTY_PRESETS[level].elo} Elo`}</option>)}</select><small>{difficulty === "adaptive" ? "Uses your unassisted move quality and recent results to choose the next challenge." : DIFFICULTY_PRESETS[difficulty].description}</small></label>
+            <label className={styles.setupField} htmlFor="setup-difficulty"><span>Rival strength</span><select id="setup-difficulty" value={difficulty} onChange={(event) => setDifficulty(event.target.value as Difficulty)}>{DIFFICULTIES.map((level) => <option key={level} value={level}>{level === "adaptive" ? `Adaptive · current level ${profile.adaptiveLevel}` : DIFFICULTY_PRESETS[level].elo === null ? `${level[0].toUpperCase() + level.slice(1)} · Maximum strength` : `${level[0].toUpperCase() + level.slice(1)} · ${DIFFICULTY_PRESETS[level].elo} Elo`}</option>)}</select><small>{difficulty === "adaptive" ? "Uses your unassisted move quality and recent results to choose the next challenge." : `${DIFFICULTY_PRESETS[difficulty].description} Elo modes use Stockfish's calibrated limited-strength setting; Master removes the limit.`}</small></label>
             </div>
             <div className={styles.setupFooter}>
               <div className={styles.setupSummary}><span><small>Mode</small><b>{sessionMode === "cup" ? "Tournament" : sessionMode === "training" ? "Training" : "Play"}</b></span><span><small>Clock</small><b>{activeTimeLabel}</b></span><span><small>Side</small><b>{sideChoice === "random" ? "Random" : sideChoice}</b></span><span><small>Rival</small><b>{difficulty}</b></span></div>

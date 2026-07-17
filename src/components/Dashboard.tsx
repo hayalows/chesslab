@@ -6,7 +6,9 @@ import Link from "next/link";
 import { Navii } from "@usenavii/react";
 import { createClient } from "@/lib/supabase/client";
 import { isSupabaseConfigured } from "@/lib/supabase/config";
-import { MILESTONES } from "@/lib/training-analytics";
+import { DEFAULT_PROFILE, type PlayerProfile } from "@/lib/game-types";
+import { adaptiveExplanation, adaptiveProgress, MILESTONES } from "@/lib/training-analytics";
+import AuthMenu from "./AuthMenu";
 import styles from "./Dashboard.module.css";
 
 type Profile = { display_name: string; avatar_seed: string; rating: number; estimated_strength: number; independent_moves: number; independent_accuracy: number; total_games: number; wins: number; losses: number; draws: number; adaptive_level: number; training_points: number; training_minutes: number; current_streak: number; best_streak: number };
@@ -14,6 +16,31 @@ type Game = { id: string; result: string; difficulty: string; opening_name: stri
 type Rating = { rating: number; recorded_at: string };
 type Stats = { favorite_openings: { name: string; games: number }[]; style_label: string | null; analyzed_games: number; average_accuracy: number | null };
 type Achievement = { id: number; name: string; description: string; unlocked_at: string | null };
+
+function GuestDashboard({ profile, reviewCount }: { profile: PlayerProfile; reviewCount: number }) {
+  const completed = MILESTONES.filter((milestone) => profile.milestones.includes(milestone.code));
+  const nextMilestone = MILESTONES.find((milestone) => !profile.milestones.includes(milestone.code));
+  const independent = profile.independentMoves > 0;
+  const adaptiveElo = 1350 + (profile.adaptiveLevel - 1) * 120;
+  return <main className={styles.shell}>
+    <header><Link href="/">← Home</Link><span>My training</span><nav aria-label="Profile actions"><Link href="/play?mode=training&time=open">Train</Link><Link href="/play?mode=game&time=rapid10">Play</Link><AuthMenu triggerLabel="Save to the cloud" prominent /></nav></header>
+    <section className={styles.hero}><div className={styles.profileAvatar}><Navii seed={profile.avatarSeed} size={78} title={profile.displayName} animated background="ring" /></div><div><span>YOUR CHESS JOURNEY</span><div className={styles.profileName}><h1>{profile.displayName}</h1><Link href="/play?mode=training&time=open">Edit in setup</Link></div><p>Your progress is saved on this device. Create a profile when you want it on every device.</p></div></section>
+    <section className={styles.guestSave}><div><span>GUEST PROFILE</span><h2>Your learning already counts.</h2><p>Keep playing now, or save this journey with email and password. Your local games will move into your profile after sign-in.</p></div><AuthMenu triggerLabel="Save my progress" prominent /></section>
+    <section className={styles.metrics}>
+      <article><span>Estimated strength</span><b>{profile.estimatedStrength}</b><small>From {profile.independentMoves} unassisted moves</small></article>
+      <article><span>Independent quality</span><b>{independent ? `${Math.round(profile.independentAccuracy)}%` : "Not measured"}</b><small>Coach-aided moves are excluded</small></article>
+      <article><span>Adaptive Rival</span><b>{profile.adaptiveLevel}<i>/10</i></b><small>About {adaptiveElo} Stockfish Elo</small></article>
+      <article><span>Training points</span><b>{profile.trainingPoints.toLocaleString()}</b><small>{profile.games} completed {profile.games === 1 ? "game" : "games"}</small></article>
+    </section>
+    <section className={styles.adaptivePath}><div><span>YOUR CURRENT CHALLENGE</span><h2>Level {profile.adaptiveLevel} · about {adaptiveElo} Elo</h2><p>{adaptiveExplanation(profile)}</p></div><div><div className={styles.levelDots}>{Array.from({ length: 10 }, (_, index) => <i key={index} data-reached={index < profile.adaptiveLevel} />)}</div><small>{adaptiveProgress(profile)}% evidence toward the next review</small></div></section>
+    <section className={styles.grid}>
+      <article className={styles.card}><div className={styles.cardTitle}><div><span>Results</span><h2>Your foundation</h2></div><em>{profile.games} games</em></div><div className={styles.resultGrid}><span><b>{profile.wins}</b>Wins</span><span><b>{profile.draws}</b>Draws</span><span><b>{profile.losses}</b>Lessons</span></div><p className={styles.cardCopy}>Results shape the Rival slowly. Independent move quality decides whether a harder game would actually help you learn.</p></article>
+      <article className={styles.card}><div className={styles.cardTitle}><div><span>Practice loop</span><h2>Turn mistakes into repetitions</h2></div><em>{reviewCount} ready</em></div><div className={styles.learning}><b>Saved positions</b><p>Important missed moments return as short board exercises.</p><Link href="/practice">Practice key positions →</Link><b>Coach fade-out</b><p>Try a clue before revealing a move. RivalMind measures your own choices separately.</p></div></article>
+      <article className={`${styles.card} ${styles.journey}`}><div className={styles.cardTitle}><div><span>Recent form</span><h2>Last five results</h2></div></div>{profile.recentResults.length ? <ol>{profile.recentResults.slice().reverse().map((result, index) => <li key={`${result}-${index}`}><i data-result={result} /><div><b>{result === "win" ? "Win" : result === "loss" ? "Lesson" : "Draw"}</b><span>{index === 0 ? "Most recent" : `${index + 1} games ago`}</span></div></li>)}</ol> : <div className={styles.empty}>Your first completed game starts this timeline.</div>}</article>
+      <article className={`${styles.card} ${styles.milestoneCard}`}><div className={styles.cardTitle}><div><span>Milestones</span><h2>Progress worth noticing</h2></div><em>{completed.length} earned</em></div>{completed.length ? <ul>{completed.map((item) => <li key={item.code}><div><b>{item.title}</b><span>{item.detail}</span></div><em>✓</em></li>)}</ul> : <div className={styles.empty}>{nextMilestone?.detail ?? "Your next milestone is waiting."}</div>}</article>
+    </section>
+  </main>;
+}
 
 export default function Dashboard() {
   const [user, setUser] = useState<User | null>(null);
@@ -25,10 +52,26 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(isSupabaseConfigured);
   const [editingName, setEditingName] = useState(false);
   const [nameDraft, setNameDraft] = useState("");
+  const [guestProfile, setGuestProfile] = useState<PlayerProfile>(DEFAULT_PROFILE);
+  const [reviewCount, setReviewCount] = useState(0);
 
   useEffect(() => {
+    let restoredGuest = DEFAULT_PROFILE;
+    let restoredReviewCount = 0;
+    try {
+      const saved = JSON.parse(window.localStorage.getItem("rivalmind-player-profile-v1") || "{}");
+      restoredGuest = { ...DEFAULT_PROFILE, ...saved };
+      const reviews = JSON.parse(window.localStorage.getItem("rivalmind-review-positions-v1") || "[]");
+      restoredReviewCount = Array.isArray(reviews) ? reviews.filter((item: { solved?: boolean }) => !item.solved).length : 0;
+    } catch { /* A local storage error should not block the profile. */ }
+    const localGuest = restoredGuest;
+    const localReviewCount = restoredReviewCount;
+    queueMicrotask(() => {
+      setGuestProfile(localGuest);
+      setReviewCount(localReviewCount);
+    });
     const supabase = createClient();
-    if (!supabase) return;
+    if (!supabase) { queueMicrotask(() => setLoading(false)); return; }
     void (async () => {
       const { data: auth } = await supabase.auth.getUser();
       setUser(auth.user);
@@ -95,7 +138,7 @@ export default function Dashboard() {
   }
 
   if (loading) return <main className={styles.center}>Loading your journey…</main>;
-  if (!user) return <main className={styles.center}><h1>Your training lives here.</h1><p>Sign in from the home page to keep games, milestones and learning analytics across devices.</p><Link href="/">Go to RivalMind</Link></main>;
+  if (!user) return <GuestDashboard profile={guestProfile} reviewCount={reviewCount} />;
   const maxRating = Math.max(1000, ...ratings.map((point) => point.rating));
   const averageThinkMs = games.length ? games.reduce((sum, game) => sum + Number(game.player_think_ms || 0), 0) / games.length : 0;
   const totalCoachUses = games.reduce((sum, game) => sum + Number(game.coach_uses || 0), 0);

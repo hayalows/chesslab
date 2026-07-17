@@ -23,6 +23,7 @@ export default function AuthMenu({ triggerLabel = "Save progress", redirectTo = 
   const [notice, setNotice] = useState("");
   const [sending, setSending] = useState(false);
   const [emailSent, setEmailSent] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
 
   useEffect(() => {
     if (!supabase) return;
@@ -45,6 +46,7 @@ export default function AuthMenu({ triggerLabel = "Save progress", redirectTo = 
     setConfirmPassword("");
     setNotice("");
     setEmailSent(false);
+    setShowPassword(false);
   }
 
   function callback(next = redirectTo) {
@@ -112,8 +114,8 @@ export default function AuthMenu({ triggerLabel = "Save progress", redirectTo = 
         <label htmlFor="rivalmind-email">Email address</label>
         <input id="rivalmind-email" autoFocus type="email" autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@example.com" />
         <label htmlFor="rivalmind-password">Password</label>
-        <input id="rivalmind-password" type="password" autoComplete={mode === "sign-in" ? "current-password" : "new-password"} value={password} onChange={(event) => setPassword(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && mode === "sign-in") void submit(); }} placeholder="At least 8 characters" />
-        {mode === "sign-up" && <><label htmlFor="rivalmind-confirm-password">Confirm password</label><input id="rivalmind-confirm-password" type="password" autoComplete="new-password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void submit(); }} placeholder="Type it again" /></>}
+        <div className={styles.passwordField}><input id="rivalmind-password" type={showPassword ? "text" : "password"} autoComplete={mode === "sign-in" ? "current-password" : "new-password"} value={password} onChange={(event) => setPassword(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && mode === "sign-in") void submit(); }} placeholder="At least 8 characters" /><button type="button" aria-pressed={showPassword} onClick={() => setShowPassword((visible) => !visible)}>{showPassword ? "Hide" : "Show"}</button></div>
+        {mode === "sign-up" && <><label htmlFor="rivalmind-confirm-password">Confirm password</label><div className={styles.passwordField}><input id="rivalmind-confirm-password" type={showPassword ? "text" : "password"} autoComplete="new-password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void submit(); }} placeholder="Type it again" /><button type="button" aria-pressed={showPassword} onClick={() => setShowPassword((visible) => !visible)}>{showPassword ? "Hide" : "Show"}</button></div></>}
 
         {mode === "sign-in" && <button className={styles.forgotButton} type="button" disabled={sending || emailSent} onClick={() => void recoverPassword()}>Forgot password?</button>}
         <button className={styles.continueButton} type="button" disabled={sending || emailSent} onClick={() => void submit()}>{sending ? "Please wait…" : emailSent ? "Check your inbox" : mode === "sign-in" ? "Sign in" : "Create my profile"}</button>

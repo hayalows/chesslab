@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { canRevealCoachStep, coachCacheMode, isPlayerTurn, normalizeCustomTime } from "../src/lib/game-session";
+import { canRevealCoachStep, coachCacheMode, coachSearchPlan, isPlayerTurn, normalizeCustomTime } from "../src/lib/game-session";
 
 test("coach turn ownership follows the selected player color", () => {
   assert.equal(isPlayerTurn("w", "w"), true);
@@ -9,10 +9,27 @@ test("coach turn ownership follows the selected player color", () => {
   assert.equal(isPlayerTurn("b", "w"), false);
 });
 
-test("visible move recommendations only reuse completed deep searches", () => {
+test("coach detail levels choose the expected default search class", () => {
   assert.equal(coachCacheMode("best"), "deep");
   assert.equal(coachCacheMode("candidates"), "deep");
   assert.equal(coachCacheMode("gentle"), "quick");
+});
+
+test("the coach shortens search without reducing candidate coverage under time pressure", () => {
+  const twoMinutePlan = coachSearchPlan("best", 120_000);
+  const criticalPlan = coachSearchPlan("candidates", 18_000);
+  assert.equal(twoMinutePlan.mode, "quick");
+  assert.equal(twoMinutePlan.options.movetimeMs, 480);
+  assert.equal(twoMinutePlan.options.multiPv, 3);
+  assert.equal(criticalPlan.options.movetimeMs, 220);
+  assert.equal(criticalPlan.pressure, "critical");
+});
+
+test("open practice keeps deep move analysis available", () => {
+  const plan = coachSearchPlan("best", null);
+  assert.equal(plan.mode, "deep");
+  assert.equal(plan.options.multiPv, 4);
+  assert.equal(plan.pressure, "none");
 });
 
 test("gentle coach does not reveal a move while deep analysis is refining", () => {

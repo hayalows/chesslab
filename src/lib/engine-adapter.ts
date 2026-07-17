@@ -11,6 +11,28 @@ type StockfishSettings = {
   elo: number | null;
   movetimeMs: number;
   multiPv: number;
+  clock?: EngineClockState;
+  moves?: string[];
+  mateMoves?: number;
+};
+
+export type EngineClockState = {
+  whiteMs: number | null;
+  blackMs: number | null;
+  whiteIncrementMs: number;
+  blackIncrementMs: number;
+};
+
+export type RivalSearchContext = {
+  clock?: EngineClockState;
+  moves?: string[];
+  movingColor?: "w" | "b";
+};
+
+export type CoachSearchOptions = {
+  movetimeMs?: number;
+  multiPv?: number;
+  mateMoves?: number;
 };
 
 type AnalysisLine = {
@@ -31,6 +53,7 @@ type PendingSearch = {
   fen: string;
   reject: (reason: Error) => void;
   resolve: (result: SearchResult & { bestMove: SearchMove }) => void;
+  timeout: ReturnType<typeof setTimeout>;
 };
 
 type BridgeMessage =
@@ -40,13 +63,13 @@ type BridgeMessage =
 
 export type EngineStatusListener = (status: EngineStatus, name: string) => void;
 
-export const DIFFICULTY_PRESETS: Record<Exclude<Difficulty, "adaptive">, { elo: number; movetimeMs: number; description: string }> = {
+export const DIFFICULTY_PRESETS: Record<Exclude<Difficulty, "adaptive">, { elo: number | null; movetimeMs: number; description: string }> = {
   beginner: { elo: 1320, movetimeMs: 220, description: "A forgiving first rival that leaves room to recover." },
   easy: { elo: 1450, movetimeMs: 380, description: "Clear plans, with enough mistakes to practice punishing them." },
   medium: { elo: 1700, movetimeMs: 650, description: "A steady club-level challenge that notices loose pieces." },
   hard: { elo: 2050, movetimeMs: 1000, description: "A precise rival that calculates tactics carefully." },
   expert: { elo: 2400, movetimeMs: 1500, description: "Serious calculation with very few unforced mistakes." },
-  master: { elo: 2850, movetimeMs: 2200, description: "Full-strength preparation for your toughest training games." },
+  master: { elo: null, movetimeMs: 2600, description: "Maximum-strength Stockfish with no Elo limit and clock-aware search." },
 };
 
 function adaptiveSettings(profile: PlayerProfile): StockfishSettings {
@@ -58,15 +81,29 @@ function adaptiveSettings(profile: PlayerProfile): StockfishSettings {
   };
 }
 
-export function opponentSettings(difficulty: Difficulty, profile: PlayerProfile): StockfishSettings {
-  if (difficulty === "adaptive") return adaptiveSettings(profile);
-  const preset = DIFFICULTY_PRESETS[difficulty];
-  return { elo: preset.elo, movetimeMs: preset.movetimeMs, multiPv: 1 };
+function clockAwareMoveCap(baseMs: number, clock?: EngineClockState, movingColor?: "w" | "b") {
+  if (!clock) return baseMs;
+  const activeClock = movingColor === "w" ? clock.whiteMs : movingColor === "b" ? clock.blackMs : null;
+  const remaining = activeClock ?? Math.min(...[clock.whiteMs, clock.blackMs].filter((value): value is number => value !== null));
+  if (!Number.isFinite(remaining)) return baseMs;
+  return Math.max(120, Math.min(baseMs, Math.round(remaining * (remaining < 30_000 ? 0.025 : 0.04))));
+}
+
+export function opponentSettings(difficulty: Difficulty, profile: PlayerProfile, context: RivalSearchContext = {}): StockfishSettings {
+  const base = difficulty === "adaptive" ? adaptiveSettings(profile) : DIFFICULTY_PRESETS[difficulty];
+  return {
+    elo: base.elo,
+    movetimeMs: clockAwareMoveCap(base.movetimeMs, context.clock, context.movingColor),
+    multiPv: 1,
+    clock: context.clock,
+    moves: context.moves,
+  };
 }
 
 export function opponentStrengthLabel(difficulty: Difficulty, profile: PlayerProfile) {
   const settings = opponentSettings(difficulty, profile);
-  return `${settings.elo} Elo · ${(settings.movetimeMs / 1000).toFixed(2)}s search`;
+  if (settings.elo === null) return `Maximum strength · up to ${(settings.movetimeMs / 1000).toFixed(1)}s search`;
+  return `${settings.elo} Elo · up to ${(settings.movetimeMs / 1000).toFixed(2)}s search`;
 }
 
 function valueAfter(tokens: string[], key: string, fallback = 0) {
@@ -145,6 +182,8 @@ class StockfishClient {
   private supportsElo = false;
   private supportsLimitStrength = false;
   private supportsWdl = false;
+  private usingModernWorker = true;
+  private triedLegacyWorker = false;
   private readonly ready: Promise<void>;
 
   constructor(private onStatus?: EngineStatusListener) {
@@ -155,9 +194,37 @@ class StockfishClient {
     });
     void this.ready.catch(() => undefined);
     if (typeof window === "undefined") return;
-    this.worker = new Worker("/stockfish/rivalmind-stockfish.worker.js");
-    this.worker.onmessage = (event: MessageEvent<BridgeMessage>) => this.handleMessage(event.data);
-    this.worker.onerror = (event) => this.fail(new Error(event.message || "Stockfish WASM could not start in this browser."));
+    this.startWorker(true);
+  }
+
+  private startWorker(modern: boolean) {
+    if (this.disposed) return;
+    this.usingModernWorker = modern;
+    this.supportsElo = false;
+    this.supportsLimitStrength = false;
+    this.supportsWdl = false;
+    this.worker?.terminate();
+    this.worker = modern
+      ? new Worker("/stockfish/rivalmind-stockfish.worker.js", { type: "module", name: "rivalmind-stockfish-18" })
+      : new Worker("/stockfish/rivalmind-stockfish-legacy.worker.js", { name: "rivalmind-stockfish-legacy" });
+    const worker = this.worker;
+    worker.onmessage = (event: MessageEvent<BridgeMessage>) => {
+      if (this.worker === worker) this.handleMessage(event.data);
+    };
+    worker.onerror = (event) => {
+      if (this.worker === worker) this.handleWorkerFailure(new Error(event.message || "Stockfish WASM could not start in this browser."));
+    };
+  }
+
+  private handleWorkerFailure(error: Error) {
+    if (this.usingModernWorker && !this.triedLegacyWorker) {
+      this.triedLegacyWorker = true;
+      this.engineName = "Stockfish compatibility engine";
+      this.onStatus?.("loading", this.engineName);
+      this.startWorker(false);
+      return;
+    }
+    this.fail(error);
   }
 
   private post(command: string) {
@@ -167,7 +234,7 @@ class StockfishClient {
 
   private handleMessage(message: BridgeMessage) {
     if (message.type === "bridge-error") {
-      this.fail(new Error(message.message));
+      this.handleWorkerFailure(new Error(message.message));
       return;
     }
     if (message.type === "bridge-ready") {
@@ -186,7 +253,8 @@ class StockfishClient {
         return;
       }
       this.post("setoption name Threads value 1");
-      this.post("setoption name Hash value 16");
+      this.post("setoption name Hash value 32");
+      this.post("setoption name Move Overhead value 100");
       if (this.supportsWdl) this.post("setoption name UCI_ShowWDL value true");
       this.post("isready");
       return;
@@ -215,6 +283,7 @@ class StockfishClient {
     this.initReject?.(error);
     this.initResolve = null;
     this.initReject = null;
+    if (this.pending) clearTimeout(this.pending.timeout);
     this.pending?.reject(error);
     this.pending = null;
     this.worker?.terminate();
@@ -226,6 +295,7 @@ class StockfishClient {
     const pending = this.pending;
     if (!pending) return;
     this.pending = null;
+    clearTimeout(pending.timeout);
     try {
       const lines = [...pending.analyses.values()].sort((a, b) => a.multipv - b.multipv);
       const bestLine = lines.find((line) => line.move === bestUci) ?? lines[0];
@@ -262,9 +332,26 @@ class StockfishClient {
       if (settings.elo !== null) this.post(`setoption name UCI_Elo value ${settings.elo}`);
       await this.waitUntilReady();
       return new Promise<SearchResult & { bestMove: SearchMove }>((resolve, reject) => {
-        this.pending = { analyses: new Map(), fen, reject, resolve };
-        this.post(`position fen ${fen}`);
-        this.post(`go movetime ${settings.movetimeMs}`);
+        const timeout = setTimeout(() => {
+          if (this.pending?.fen !== fen) return;
+          try { this.post("stop"); } catch { /* The worker may already be recovering. */ }
+          this.pending = null;
+          reject(new Error("Stockfish search timed out before returning a completed line."));
+        }, Math.max(4_000, settings.movetimeMs + 3_000));
+        this.pending = { analyses: new Map(), fen, reject, resolve, timeout };
+        this.post(settings.moves?.length ? `position startpos moves ${settings.moves.join(" ")}` : `position fen ${fen}`);
+        const limits: string[] = [];
+        if (settings.clock && settings.clock.whiteMs !== null && settings.clock.blackMs !== null) {
+          limits.push(
+            `wtime ${Math.max(1, Math.round(settings.clock.whiteMs))}`,
+            `btime ${Math.max(1, Math.round(settings.clock.blackMs))}`,
+            `winc ${Math.max(0, Math.round(settings.clock.whiteIncrementMs))}`,
+            `binc ${Math.max(0, Math.round(settings.clock.blackIncrementMs))}`,
+          );
+        }
+        limits.push(`movetime ${Math.max(50, Math.round(settings.movetimeMs))}`);
+        if (settings.mateMoves) limits.push(`mate ${settings.mateMoves}`);
+        this.post(`go ${limits.join(" ")}`);
       });
     });
     this.queue = run.catch(() => undefined);
@@ -276,27 +363,28 @@ class StockfishClient {
     try { this.worker?.postMessage("quit"); } catch { /* Worker may already be gone. */ }
     this.worker?.terminate();
     this.worker = null;
+    if (this.pending) clearTimeout(this.pending.timeout);
     this.pending?.reject(new Error("Stockfish was stopped."));
     this.pending = null;
   }
 }
 
 export interface OpponentEngine {
-  chooseMove(fen: string, difficulty: Difficulty, profile: PlayerProfile): Promise<SearchResult & { move: SearchMove }>;
+  chooseMove(fen: string, difficulty: Difficulty, profile: PlayerProfile, context?: RivalSearchContext): Promise<SearchResult & { move: SearchMove }>;
   dispose(): void;
 }
 
 export interface AssistantEngine {
-  analyze(fen: string, mode?: "quick" | "deep"): Promise<SearchResult>;
-  peek(fen: string, mode?: "quick" | "deep"): SearchResult | null;
+  analyze(fen: string, mode?: "quick" | "deep", options?: CoachSearchOptions): Promise<SearchResult>;
+  peek(fen: string, mode?: "quick" | "deep", options?: CoachSearchOptions): SearchResult | null;
   dispose(): void;
 }
 
 export class RivalEngine implements OpponentEngine {
   private client: StockfishClient;
   constructor(onStatus?: EngineStatusListener) { this.client = new StockfishClient(onStatus); }
-  async chooseMove(fen: string, difficulty: Difficulty, profile: PlayerProfile) {
-    const result = await this.client.search(fen, opponentSettings(difficulty, profile));
+  async chooseMove(fen: string, difficulty: Difficulty, profile: PlayerProfile, context: RivalSearchContext = {}) {
+    const result = await this.client.search(fen, opponentSettings(difficulty, profile, context));
     return { ...result, move: result.bestMove };
   }
   dispose() { this.client.dispose(); }
@@ -304,33 +392,45 @@ export class RivalEngine implements OpponentEngine {
 
 export class RivalAssistant implements AssistantEngine {
   private client: StockfishClient;
-  private cache = new Map<string, { quick?: SearchResult; deep?: SearchResult }>();
+  private cache = new Map<string, SearchResult>();
+  private inFlight = new Map<string, Promise<SearchResult>>();
   constructor(onStatus?: EngineStatusListener) { this.client = new StockfishClient(onStatus); }
-  peek(fen: string, mode: "quick" | "deep" = "quick") {
-    const entry = this.cache.get(fen);
-    const result = mode === "deep" ? entry?.deep : entry?.deep ?? entry?.quick;
+  private cacheKey(fen: string, mode: "quick" | "deep", multiPv: number) {
+    return `${fen}|${mode}|${multiPv}`;
+  }
+  peek(fen: string, mode: "quick" | "deep" = "quick", options: CoachSearchOptions = {}) {
+    const multiPv = options.multiPv ?? (mode === "deep" ? 4 : 3);
+    const result = this.cache.get(this.cacheKey(fen, mode, multiPv));
     return result ? { ...result, cached: true } : null;
   }
-  async analyze(fen: string, mode: "quick" | "deep" = "quick") {
-    const cached = mode === "quick" ? this.cache.get(fen)?.deep ?? this.cache.get(fen)?.quick : this.cache.get(fen)?.deep;
+  async analyze(fen: string, mode: "quick" | "deep" = "quick", options: CoachSearchOptions = {}) {
+    const multiPv = options.multiPv ?? (mode === "deep" ? 4 : 3);
+    const key = this.cacheKey(fen, mode, multiPv);
+    const cached = this.cache.get(key);
     if (cached) return { ...cached, cached: true };
-    const result = await this.client.search(fen, mode === "deep"
-      ? { elo: null, movetimeMs: 1800, multiPv: 4 }
-      : { elo: null, movetimeMs: 520, multiPv: 3 });
-    const clean: SearchResult = {
-      candidates: result.candidates,
-      depth: result.depth,
-      engine: result.engine,
-      nodes: result.nodes,
-      nps: result.nps,
-      timeMs: result.timeMs,
-      wdl: result.wdl,
-    };
-    const entry = this.cache.get(fen) ?? {};
-    entry[mode] = clean;
-    this.cache.set(fen, entry);
-    if (this.cache.size > 48) this.cache.delete(this.cache.keys().next().value!);
-    return clean;
+    const existing = this.inFlight.get(key);
+    if (existing) return existing;
+    const search = this.client.search(fen, {
+      elo: null,
+      movetimeMs: options.movetimeMs ?? (mode === "deep" ? 1400 : 480),
+      multiPv,
+      mateMoves: options.mateMoves,
+    }).then((result) => {
+      const clean: SearchResult = {
+        candidates: result.candidates,
+        depth: result.depth,
+        engine: result.engine,
+        nodes: result.nodes,
+        nps: result.nps,
+        timeMs: result.timeMs,
+        wdl: result.wdl,
+      };
+      this.cache.set(key, clean);
+      if (this.cache.size > 48) this.cache.delete(this.cache.keys().next().value!);
+      return clean;
+    }).finally(() => this.inFlight.delete(key));
+    this.inFlight.set(key, search);
+    return search;
   }
   dispose() { this.client.dispose(); }
 }
