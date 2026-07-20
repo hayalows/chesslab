@@ -8,9 +8,15 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test": "tsx --test tests/**/*.test.ts",
+    "train:human-plan": "node scripts/train-human-plan-model.mjs"
   },
   "dependencies": {
+    "@lichess-org/stockfish-web": "0.4.2",
+    "@supabase/ssr": "0.12.3",
+    "@supabase/supabase-js": "2.110.6",
+    "@usenavii/react": "^0.8.1",
     "chess.js": "^1.4.0",
     "next": "16.2.10",
     "react": "19.2.4",
@@ -24,6 +30,10 @@
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "16.2.10",
+    "tsx": "4.23.1",
     "typescript": "^5"
+  },
+  "overrides": {
+    "postcss": "8.5.10"
   }
 }

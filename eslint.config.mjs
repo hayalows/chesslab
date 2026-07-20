@@ -11,8 +11,11 @@ const eslintConfig = defineConfig([
     ".next/**",
     "out/**",
     "build/**",
-    "public/stockfish/stockfish.js",
-    "public/stockfish/stockfish.worker.js",
+    // Generated third-party engine bundles are copied during postinstall.
+    // Linting multi-megabyte Emscripten output adds minutes and no signal.
+    "public/stockfish/*.js",
+    "public/stockfish/*.wasm",
+    "public/stockfish/*.nnue",
     "next-env.d.ts",
   ]),
 ]);
